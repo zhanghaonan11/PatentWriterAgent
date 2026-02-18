@@ -6,10 +6,11 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import List
+from typing import Dict, List
 
 from runtime_client import RUNTIME_CONFIGS, get_available_runtime_backends, runtime_setup_hint
 
@@ -20,6 +21,12 @@ APP_FILE = ROOT_DIR / "patent_writer_app.py"
 PIPELINE_RUNNER = ROOT_DIR / "pipeline_runner.py"
 
 REQUIRED_MODULES = ["streamlit", "psutil", "markitdown"]
+
+CLI_CONFIGS: Dict[str, Dict[str, str]] = {
+    "claude": {"label": "Claude CLI", "binary": "claude"},
+    "codex": {"label": "OpenAI Codex CLI", "binary": "codex"},
+    "gemini": {"label": "Google Gemini CLI", "binary": "gemini"},
+}
 
 
 def log(message: str) -> None:
@@ -81,10 +88,26 @@ def check_runtime_backends() -> None:
 
     if available:
         labels = [RUNTIME_CONFIGS[b].label for b in available]
-        log(f"Available generation runtimes: {', '.join(labels)}")
+        log(f"Available native runtimes: {', '.join(labels)}")
         return
 
-    log("Warning: No runtime backend is ready. Configure API credentials for Anthropic-compatible or OpenAI-compatible backend.")
+    log("Warning: No native runtime backend is ready.")
+
+
+def check_cli_backends() -> None:
+    detected = []
+    for cfg in CLI_CONFIGS.values():
+        cli_path = shutil.which(cfg["binary"])
+        if cli_path:
+            detected.append(cfg["label"])
+            log(f"{cfg['label']} detected: {cli_path}")
+        else:
+            log(f"Warning: {cfg['label']} not found in PATH.")
+
+    if detected:
+        log(f"Available CLI runtimes: {', '.join(detected)}")
+    else:
+        log("Warning: No CLI runtime detected.")
 
 
 def check_required_files() -> None:
@@ -132,6 +155,7 @@ def main() -> None:
     check_required_files()
     ensure_dependencies(auto_install=not args.skip_install)
     check_runtime_backends()
+    check_cli_backends()
 
     if args.check_only:
         log("Environment checks completed.")
