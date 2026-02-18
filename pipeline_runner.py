@@ -6,10 +6,13 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import re
 import shutil
 import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -24,6 +27,12 @@ from runtime_client import (
     runtime_setup_hint,
 )
 
+from app.config import (
+    DEFAULT_DESCRIPTION_PARALLELISM,
+    DESCRIPTION_PARALLELISM_MAX,
+    DESCRIPTION_PARALLELISM_MIN,
+)
+
 
 ROOT_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = ROOT_DIR / "output"
@@ -32,6 +41,8 @@ PATENT_SKILL_PATH = ROOT_DIR / "PATENT_SKILL.md"
 PATENT_GUIDE_PATH = ROOT_DIR / "patent-writer" / "references" / "patent-writing-guide.md"
 
 logger = logging.getLogger("pipeline_runner")
+
+WHITESPACE_RE = re.compile(r"\s+")
 
 
 def log(message: str) -> None:
@@ -111,8 +122,51 @@ def extract_block(text: str, begin: str, end: str) -> str:
     return m.group(1).strip()
 
 
+def to_positive_int(value: Any, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def clamp_description_parallelism(value: Any) -> int:
+    parsed = to_positive_int(value, DEFAULT_DESCRIPTION_PARALLELISM)
+    if parsed < DESCRIPTION_PARALLELISM_MIN:
+        return DESCRIPTION_PARALLELISM_MIN
+    if parsed > DESCRIPTION_PARALLELISM_MAX:
+        return DESCRIPTION_PARALLELISM_MAX
+    return parsed
+
+
+def normalized_char_len(text: str) -> int:
+    return len(WHITESPACE_RE.sub("", text or ""))
+
+
+def to_relevance(value: Any, default: float = 0.6) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+
+    if parsed != parsed:  # NaN
+        return default
+
+    if parsed < 0:
+        return 0.0
+    if parsed > 1:
+        return 1.0
+    return parsed
+
+
+@lru_cache(maxsize=32)
 def load_agent_instruction(name: str) -> str:
     return read_text(AGENTS_DIR / f"{name}.md")
+
+
+@lru_cache(maxsize=8)
+def load_static_reference(path_str: str) -> str:
+    return read_text(Path(path_str))
 
 
 def llm(runtime_backend: str, prompt: str, *, max_tokens: int, temperature: float, timeout_seconds: int = 900) -> str:
@@ -247,7 +301,7 @@ def stage_patent_searcher(ctx: Dict[str, Any]) -> None:
                     "title": str(item.get("title", "未命名参考专利")).strip() or "未命名参考专利",
                     "publication_no": str(item.get("publication_no", "N/A")).strip() or "N/A",
                     "country": str(item.get("country", "CN")).strip() or "CN",
-                    "relevance": float(item.get("relevance", 0.6)),
+                    "relevance": to_relevance(item.get("relevance", 0.6)),
                     "key_points": normalize_list(item.get("key_points"))[:6],
                     "analysis": str(item.get("analysis", "")).strip(),
                 }
@@ -284,8 +338,8 @@ def stage_outline_generator(ctx: Dict[str, Any]) -> None:
 
     parsed = read_json(session_dir / "01_input" / "parsed_info.json", {})
     similar = read_json(session_dir / "02_research" / "similar_patents.json", [])
-    guide = trim_text(read_text(PATENT_GUIDE_PATH), 12000)
-    skill = trim_text(read_text(PATENT_SKILL_PATH), 12000)
+    guide = trim_text(load_static_reference(str(PATENT_GUIDE_PATH)), 12000)
+    skill = trim_text(load_static_reference(str(PATENT_SKILL_PATH)), 12000)
     instruction = trim_text(load_agent_instruction("outline-generator"), 6000)
 
     prompt = f"""请输出两个区块：
@@ -423,7 +477,7 @@ def _generate_long_section(runtime_backend: str, heading: str, min_chars: int, c
 """
 
     text = llm(runtime_backend, prompt, max_tokens=3200, temperature=0.25, timeout_seconds=1200).strip()
-    if len(re.sub(r"\s+", "", text)) < min_chars:
+    if normalized_char_len(text) < min_chars:
         expand = f"请在不改变技术逻辑前提下扩写到至少 {min_chars} 个中文字符，仅输出最终正文：\n{text}"
         text = llm(runtime_backend, expand, max_tokens=3200, temperature=0.3, timeout_seconds=1200).strip()
     return text
@@ -437,9 +491,10 @@ def stage_description_writer(ctx: Dict[str, Any]) -> None:
     outline = read_text(session_dir / "03_outline" / "patent_outline.md")
     abstract = read_text(session_dir / "04_content" / "abstract.md")
     claims = read_text(session_dir / "04_content" / "claims.md")
+    description_parallelism = clamp_description_parallelism(ctx.get("description_parallelism"))
     prior = read_text(session_dir / "02_research" / "prior_art_analysis.md")
-    skill = trim_text(read_text(PATENT_SKILL_PATH), 12000)
-    guide = trim_text(read_text(PATENT_GUIDE_PATH), 12000)
+    skill = trim_text(load_static_reference(str(PATENT_SKILL_PATH)), 12000)
+    guide = trim_text(load_static_reference(str(PATENT_GUIDE_PATH)), 12000)
     instruction = trim_text(load_agent_instruction("description-writer"), 7000)
 
     ctx_text = trim_text(
@@ -458,12 +513,37 @@ def stage_description_writer(ctx: Dict[str, Any]) -> None:
         30000,
     )
 
-    tech = _generate_long_section(runtime_backend, "技术领域", 220, ctx_text)
-    bg = _generate_long_section(runtime_backend, "背景技术", 1500, ctx_text)
-    summary = _generate_long_section(runtime_backend, "发明内容", 1800, ctx_text)
-    drawing = _generate_long_section(runtime_backend, "附图说明", 360, ctx_text)
-    impl_a = _generate_long_section(runtime_backend, "具体实施方式（实施例一）", 3600, ctx_text)
-    impl_b = _generate_long_section(runtime_backend, "具体实施方式（实施例二）", 3600, ctx_text)
+    section_specs: List[Tuple[str, str, int]] = [
+        ("tech", "技术领域", 220),
+        ("bg", "背景技术", 1500),
+        ("summary", "发明内容", 1800),
+        ("drawing", "附图说明", 360),
+        ("impl_a", "具体实施方式（实施例一）", 3600),
+        ("impl_b", "具体实施方式（实施例二）", 3600),
+    ]
+
+    sections: Dict[str, str] = {}
+    if description_parallelism <= 1:
+        for key, heading, min_chars in section_specs:
+            sections[key] = _generate_long_section(runtime_backend, heading, min_chars, ctx_text)
+    else:
+        workers = min(description_parallelism, len(section_specs))
+        log(f"[description-writer] section generation parallelism={workers}")
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            future_to_key = {
+                executor.submit(_generate_long_section, runtime_backend, heading, min_chars, ctx_text): key
+                for key, heading, min_chars in section_specs
+            }
+            for future in as_completed(future_to_key):
+                key = future_to_key[future]
+                sections[key] = future.result()
+
+    tech = sections["tech"]
+    bg = sections["bg"]
+    summary = sections["summary"]
+    drawing = sections["drawing"]
+    impl_a = sections["impl_a"]
+    impl_b = sections["impl_b"]
 
     description = (
         "## 技术领域\n\n"
@@ -481,7 +561,7 @@ def stage_description_writer(ctx: Dict[str, Any]) -> None:
         + "\n"
     )
 
-    if len(re.sub(r"\s+", "", description)) < 10000:
+    if normalized_char_len(description) < 10000:
         expand = (
             "以下说明书长度不足，请扩写‘具体实施方式’使总长度超过10000中文字符。"
             "输出完整 Markdown：\n\n" + description
@@ -629,7 +709,7 @@ def stage_markdown_merger(ctx: Dict[str, Any]) -> None:
     final_dir.mkdir(parents=True, exist_ok=True)
     write_text(final_dir / "complete_patent.md", final_md.strip() + "\n")
 
-    description_len = len(re.sub(r"\s+", "", description))
+    description_len = normalized_char_len(description)
     summary = "\n".join(
         [
             "# 生成摘要",
@@ -743,9 +823,19 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run patent writing pipeline without external AI CLI")
     parser.add_argument("--session-id", required=True)
     parser.add_argument("--input-path", required=True)
-    parser.add_argument("--runtime-backend", default=DEFAULT_RUNTIME_BACKEND, choices=["anthropic", "openai"])
+    parser.add_argument(
+        "--runtime-backend",
+        default=DEFAULT_RUNTIME_BACKEND,
+        choices=["anthropic", "openai", "codex-cli"],
+    )
     parser.add_argument("--task-prompt", default="")
     parser.add_argument("--max-stage-retries", type=int, default=3)
+    parser.add_argument(
+        "--description-parallelism",
+        type=int,
+        default=clamp_description_parallelism(os.environ.get("PATENT_DESCRIPTION_PARALLELISM")),
+        help="Max concurrent section generations in description-writer stage.",
+    )
     return parser.parse_args()
 
 
@@ -780,7 +870,9 @@ def main() -> int:
         "task_prompt": args.task_prompt,
     }
 
-    retries = max(1, int(args.max_stage_retries))
+    retries = to_positive_int(args.max_stage_retries, 3)
+    ctx["description_parallelism"] = clamp_description_parallelism(args.description_parallelism)
+    log(f"Description section parallelism: {ctx['description_parallelism']}")
     for name, fn in stage_plan():
         run_stage(ctx, name, fn, retries)
 

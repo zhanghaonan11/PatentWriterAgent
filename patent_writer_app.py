@@ -26,6 +26,9 @@ from app.config import (
     DATA_DIR,
     DEFAULT_CLI_BACKEND,
     DEFAULT_EXECUTION_MODE,
+    DEFAULT_DESCRIPTION_PARALLELISM,
+    DESCRIPTION_PARALLELISM_MAX,
+    DESCRIPTION_PARALLELISM_MIN,
     EXEC_MODE_CLI,
     EXEC_MODE_NATIVE,
     MODE_FAST,
@@ -35,16 +38,19 @@ from app.config import (
     ROOT_DIR,
 )
 from app.utils import (
+    clamp_int,
     format_timestamp,
     human_file_size,
     is_valid_uuid,
     read_text_preview,
     to_display_path,
+    to_positive_int,
     resolve_workspace_path,
 )
 from app.backend import (
     build_cli_command,
     build_runner_command,
+    clamp_description_parallelism,
     get_available_cli_backends,
     get_execution_mode_label,
     get_mode_label,
@@ -209,6 +215,7 @@ def start_generation(
     execution_mode: str,
     runtime_backend: str,
     cli_backend: str,
+    description_parallelism: int,
 ) -> tuple[bool, str]:
     if not is_valid_uuid(session_id):
         return False, "Session ID must be a valid UUID."
@@ -223,7 +230,14 @@ def start_generation(
     if execution_mode == EXEC_MODE_CLI:
         if not is_cli_available(cli_backend):
             return False, f"{get_cli_label(cli_backend)} not found in PATH."
-        command = build_cli_command(cli_backend, session_id, prompt)
+        command = build_cli_command(
+            cli_backend,
+            session_id,
+            prompt,
+            input_path=input_path,
+            description_parallelism=clamp_description_parallelism(description_parallelism),
+            fast_mode=False,
+        )
         backend_msg = get_cli_label(cli_backend)
     else:
         if not is_runtime_available(runtime_backend):
@@ -231,7 +245,13 @@ def start_generation(
                 False,
                 f"{safe_runtime_label(runtime_backend)} is not ready. {runtime_setup_hint(runtime_backend)}",
             )
-        command = build_runner_command(runtime_backend, session_id, input_path, prompt)
+        command = build_runner_command(
+            runtime_backend,
+            session_id,
+            input_path,
+            prompt,
+            clamp_description_parallelism(description_parallelism),
+        )
         backend_msg = safe_runtime_label(runtime_backend)
 
     append_log_banner(session_id, command)
@@ -339,6 +359,7 @@ def initialize_state() -> None:
         "max_log_lines": 500,
         "auto_refresh": True,
         "refresh_seconds": 2,
+        "description_parallelism": DEFAULT_DESCRIPTION_PARALLELISM,
     }
 
     for key, value in defaults.items():
@@ -369,6 +390,14 @@ def normalize_state_values() -> None:
     if input_mode not in (MODE_NORMAL, MODE_FAST):
         input_mode = MODE_NORMAL
     st.session_state.input_mode = input_mode
+
+    parallelism_raw = st.session_state.get("description_parallelism", DEFAULT_DESCRIPTION_PARALLELISM)
+    parallelism = to_positive_int(parallelism_raw, DEFAULT_DESCRIPTION_PARALLELISM)
+    st.session_state.description_parallelism = clamp_int(
+        parallelism,
+        DESCRIPTION_PARALLELISM_MIN,
+        DESCRIPTION_PARALLELISM_MAX,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -430,6 +459,13 @@ def main() -> None:
                 options=list(RUNTIME_CONFIGS.keys()),
                 key="selected_runtime_backend",
                 format_func=safe_runtime_label,
+            )
+            st.slider(
+                "Description parallelism",
+                min_value=DESCRIPTION_PARALLELISM_MIN,
+                max_value=DESCRIPTION_PARALLELISM_MAX,
+                key="description_parallelism",
+                help="Concurrent section generation in description stage (native runtime only).",
             )
         else:
             st.selectbox(
@@ -497,6 +533,9 @@ def main() -> None:
     selected_runtime_backend = str(st.session_state.selected_runtime_backend)
     selected_cli_backend = str(st.session_state.selected_cli_backend)
     input_mode = str(st.session_state.input_mode)
+    description_parallelism = clamp_description_parallelism(
+        to_positive_int(st.session_state.description_parallelism, DEFAULT_DESCRIPTION_PARALLELISM)
+    )
 
     fast_idea = str(st.session_state.fast_invention_idea or "").strip()
 
@@ -539,6 +578,7 @@ def main() -> None:
     st.caption(
         f"Selected: `{selected_mode_label}` / `{selected_backend_label}` | "
         f"Running: `{get_execution_mode_label(running_execution_mode)}` / `{running_backend_label}`"
+        f" | Description parallelism: `{description_parallelism}`"
     )
 
     if not is_valid_uuid(session_id):
@@ -633,6 +673,7 @@ def main() -> None:
             execution_mode=selected_execution_mode,
             runtime_backend=selected_runtime_backend,
             cli_backend=selected_cli_backend,
+            description_parallelism=description_parallelism,
         )
         if success:
             st.success(message)
@@ -700,7 +741,9 @@ def main() -> None:
         else:
             session_dir = get_session_dir(session_id)
             st.caption(to_display_path(session_dir))
-            archive_data = build_session_archive(session_id)
+            archive_data: Optional[bytes] = None
+            if running_metadata is None:
+                archive_data = build_session_archive(session_id)
             if archive_data is not None:
                 st.download_button(
                     label=f"Download session bundle ({session_id}.zip)",
@@ -709,6 +752,8 @@ def main() -> None:
                     mime="application/zip",
                     width="stretch",
                 )
+            else:
+                st.caption("Session bundle will be available after run completion.")
             render_file_preview(
                 "01_input/parsed_info.json",
                 session_dir / "01_input" / "parsed_info.json",

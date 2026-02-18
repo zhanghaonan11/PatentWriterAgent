@@ -262,7 +262,7 @@ def run_cli_once(
 ) -> Tuple[bool, str, str, List[str]]:
     from app.backend import build_cli_command
 
-    command = build_cli_command(cli_backend, session_id, prompt)
+    command = build_cli_command(cli_backend, session_id, prompt, fast_mode=True)
     try:
         completed = subprocess.run(
             command,

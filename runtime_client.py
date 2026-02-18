@@ -6,6 +6,9 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shutil
+import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -29,9 +32,22 @@ RUNTIME_CONFIGS: Dict[str, RuntimeConfig] = {
         env_keys=["OPENAI_API_KEY"],
         package="openai",
     ),
+    "codex-cli": RuntimeConfig(
+        label="Codex CLI bridge",
+        env_keys=[],
+        package="",
+    ),
 }
 
-DEFAULT_RUNTIME_BACKEND = os.environ.get("PATENT_RUNTIME_BACKEND", "anthropic")
+
+def _resolve_default_runtime_backend() -> str:
+    backend = (os.environ.get("PATENT_RUNTIME_BACKEND") or "anthropic").strip().lower()
+    if backend in RUNTIME_CONFIGS:
+        return backend
+    return "anthropic"
+
+
+DEFAULT_RUNTIME_BACKEND = _resolve_default_runtime_backend()
 
 
 class RuntimeClientError(RuntimeError):
@@ -90,7 +106,12 @@ def _first_env(keys: List[str]) -> Optional[str]:
 
 def _has_package(runtime_backend: str) -> bool:
     backend = normalize_runtime_backend(runtime_backend)
+    if backend == "codex-cli":
+        return shutil.which("codex") is not None
+
     package = RUNTIME_CONFIGS[backend].package
+    if not package:
+        return True
     return importlib.util.find_spec(package) is not None
 
 
@@ -122,7 +143,10 @@ def runtime_setup_hint(runtime_backend: str) -> str:
             hints.append("Missing one of environment variables: " + ", ".join(missing))
 
     if not _has_package(backend):
-        hints.append(f"Missing Python package: {RUNTIME_CONFIGS[backend].package}")
+        if backend == "codex-cli":
+            hints.append("Codex CLI not found in PATH")
+        else:
+            hints.append(f"Missing Python package: {RUNTIME_CONFIGS[backend].package}")
 
     return "; ".join(hints)
 
@@ -332,6 +356,126 @@ def _generate_with_openai(
     raise RuntimeClientError("OpenAI responses API did not include text content")
 
 
+def _extract_codex_text_from_jsonl(raw_output: str) -> str:
+    messages: List[str] = []
+
+    for line in raw_output.splitlines():
+        text = line.strip()
+        if not text or not text.startswith("{"):
+            continue
+
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+
+        event_type = payload.get("type")
+        if event_type == "item.completed":
+            item = payload.get("item") or {}
+            if item.get("type") == "agent_message":
+                value = str(item.get("text", "")).strip()
+                if value:
+                    messages.append(value)
+        elif event_type == "assistant":
+            message = payload.get("message") or {}
+            content = message.get("content") or []
+            if isinstance(content, list):
+                for part in content:
+                    if not isinstance(part, dict):
+                        continue
+                    if part.get("type") != "text":
+                        continue
+                    value = str(part.get("text", "")).strip()
+                    if value:
+                        messages.append(value)
+        elif event_type == "result":
+            value = payload.get("result")
+            if isinstance(value, str) and value.strip():
+                messages.append(value.strip())
+
+    if messages:
+        return messages[-1]
+    return ""
+
+
+def _generate_with_codex_cli(
+    prompt: str,
+    system_prompt: Optional[str],
+    timeout_seconds: int,
+) -> str:
+    if shutil.which("codex") is None:
+        raise RuntimeClientError("Codex CLI not found in PATH")
+
+    final_prompt = prompt.strip()
+    if system_prompt:
+        final_prompt = f"系统指令：\n{system_prompt.strip()}\n\n用户任务：\n{prompt.strip()}"
+
+    output_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(prefix="codex_last_message_", suffix=".txt", delete=False) as handle:
+            output_path = handle.name
+
+        command = [
+            "codex",
+            "exec",
+            "--json",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "-o",
+            output_path,
+            final_prompt,
+        ]
+
+        completed = subprocess.run(
+            command,
+            cwd=str(Path(__file__).resolve().parent),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout_seconds,
+            check=False,
+        )
+        output = completed.stdout or ""
+
+        if completed.returncode != 0:
+            tail = "\n".join(output.splitlines()[-30:]).strip()
+            detail = f"\n{tail}" if tail else ""
+            raise RuntimeClientError(f"codex CLI exited with code {completed.returncode}.{detail}")
+
+        message = ""
+        if output_path:
+            try:
+                message = Path(output_path).read_text(encoding="utf-8").strip()
+            except OSError:
+                message = ""
+
+        if message:
+            return message
+
+        message = _extract_codex_text_from_jsonl(output)
+        if message:
+            return message
+
+        raise RuntimeClientError("codex CLI response did not include text content")
+    except subprocess.TimeoutExpired as exc:
+        tail = ""
+        if exc.stdout:
+            if isinstance(exc.stdout, bytes):
+                decoded = exc.stdout.decode("utf-8", errors="replace")
+            else:
+                decoded = str(exc.stdout)
+            tail = "\n".join(decoded.splitlines()[-20:]).strip()
+        detail = f"\n{tail}" if tail else ""
+        raise RuntimeClientError(f"codex CLI timed out after {timeout_seconds} seconds.{detail}") from exc
+    finally:
+        if output_path:
+            try:
+                Path(output_path).unlink()
+            except OSError:
+                pass
+
+
 def generate_text(
     runtime_backend: str,
     prompt: str,
@@ -356,6 +500,12 @@ def generate_text(
             system_prompt=system_prompt,
             max_tokens=max_tokens,
             temperature=temperature,
+            timeout_seconds=timeout_seconds,
+        )
+    if backend == "codex-cli":
+        return _generate_with_codex_cli(
+            prompt=prompt,
+            system_prompt=system_prompt,
             timeout_seconds=timeout_seconds,
         )
     raise RuntimeClientError(f"Unsupported runtime backend: {runtime_backend}")
