@@ -7,11 +7,10 @@ import argparse
 import json
 import re
 import shutil
-import sys
 import traceback
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from markitdown import MarkItDown
 
@@ -33,8 +32,8 @@ PATENT_GUIDE_PATH = ROOT_DIR / "patent-writer" / "references" / "patent-writing-
 
 
 def log(message: str) -> None:
-    timestamp = datetime.now().isoformat(timespec="seconds")
-    print(f"[{timestamp}] {message}", flush=True)
+    ts = datetime.now().isoformat(timespec="seconds")
+    print(f"[{ts}] {message}", flush=True)
 
 
 def read_text(path: Path, default: str = "") -> str:
@@ -49,11 +48,6 @@ def write_text(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
-def write_json(path: Path, payload: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
 def read_json(path: Path, default: Any) -> Any:
     if not path.exists():
         return default
@@ -63,37 +57,37 @@ def read_json(path: Path, default: Any) -> Any:
         return default
 
 
-def trim_context(text: str, limit: int = 24000) -> str:
-    value = text.strip()
-    if len(value) <= limit:
-        return value
-    head = value[: limit // 2]
-    tail = value[-(limit // 2) :]
-    return head + "\n\n...[truncated for context size]...\n\n" + tail
+def write_json(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def normalize_list(value: Any) -> List[str]:
     if isinstance(value, list):
-        return [str(item).strip() for item in value if str(item).strip()]
+        return [str(x).strip() for x in value if str(x).strip()]
     if isinstance(value, str):
-        parts = re.split(r"[\n,，;；]", value)
-        return [part.strip() for part in parts if part.strip()]
+        return [s.strip() for s in re.split(r"[\n,，;；]", value) if s.strip()]
     return []
 
 
-def extract_json_from_text(text: str) -> Optional[Any]:
-    raw = text.strip()
+def trim_text(text: str, limit: int = 20000) -> str:
+    value = (text or "").strip()
+    if len(value) <= limit:
+        return value
+    return value[: limit // 2] + "\n\n...[truncated]...\n\n" + value[-(limit // 2) :]
+
+
+def extract_json(text: str) -> Optional[Any]:
+    raw = (text or "").strip()
     if not raw:
         return None
 
-    for candidate in (raw,):
-        try:
-            return json.loads(candidate)
-        except json.JSONDecodeError:
-            pass
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
 
-    fenced = re.findall(r"```(?:json)?\s*(.*?)```", raw, flags=re.DOTALL | re.IGNORECASE)
-    for block in fenced:
+    for block in re.findall(r"```(?:json)?\s*(.*?)```", raw, flags=re.DOTALL | re.IGNORECASE):
         try:
             return json.loads(block.strip())
         except json.JSONDecodeError:
@@ -101,56 +95,54 @@ def extract_json_from_text(text: str) -> Optional[Any]:
 
     match = re.search(r"(\{.*\}|\[.*\])", raw, flags=re.DOTALL)
     if match:
-        snippet = match.group(1).strip()
         try:
-            return json.loads(snippet)
+            return json.loads(match.group(1))
         except json.JSONDecodeError:
             return None
     return None
 
 
-def extract_block(text: str, start_tag: str, end_tag: str) -> str:
-    pattern = re.compile(
-        re.escape(start_tag) + r"(.*?)" + re.escape(end_tag),
-        flags=re.DOTALL,
+def extract_block(text: str, begin: str, end: str) -> str:
+    m = re.search(re.escape(begin) + r"(.*?)" + re.escape(end), text, flags=re.DOTALL)
+    if not m:
+        return ""
+    return m.group(1).strip()
+
+
+def load_agent_instruction(name: str) -> str:
+    return read_text(AGENTS_DIR / f"{name}.md")
+
+
+def llm(runtime_backend: str, prompt: str, *, max_tokens: int, temperature: float, timeout_seconds: int = 900) -> str:
+    return generate_text(
+        runtime_backend=runtime_backend,
+        prompt=prompt,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        timeout_seconds=timeout_seconds,
     )
-    match = pattern.search(text)
-    if not match:
-        return ""
-    return match.group(1).strip()
-
-
-def extract_first_mermaid_block(text: str) -> str:
-    match = re.search(r"```mermaid\s*(.*?)```", text, flags=re.DOTALL | re.IGNORECASE)
-    if not match:
-        return ""
-    return match.group(1).strip()
-
-
-def load_agent_instruction(agent_name: str) -> str:
-    return read_text(AGENTS_DIR / f"{agent_name}.md")
 
 
 def normalize_parsed_info(payload: Dict[str, Any]) -> Dict[str, Any]:
     title = str(payload.get("title", "")).strip() or "一种数据处理方法、装置、设备及存储介质"
-    technical_problem = str(payload.get("technical_problem", "")).strip() or "提升处理效率并降低资源消耗。"
-    technical_solution = str(payload.get("technical_solution", "")).strip() or "通过模块化流程和参数化策略实现目标任务处理。"
+    technical_problem = str(payload.get("technical_problem", "")).strip() or "解决处理效率与资源利用率问题。"
+    technical_solution = str(payload.get("technical_solution", "")).strip() or "通过分层流程与自适应策略完成处理。"
 
     existing_solutions = normalize_list(payload.get("existing_solutions"))
     if not existing_solutions:
-        existing_solutions = ["基于单一规则引擎的处理方案", "基于集中式调度的处理方案"]
+        existing_solutions = ["集中式规则处理方案", "固定流程批处理方案"]
 
     existing_drawbacks = normalize_list(payload.get("existing_drawbacks"))
     if not existing_drawbacks:
-        existing_drawbacks = ["扩展性不足", "异常场景处理能力弱"]
+        existing_drawbacks = ["扩展性不足", "异常恢复能力弱"]
 
     benefits = normalize_list(payload.get("benefits"))
     if not benefits:
-        benefits = ["提高处理吞吐能力", "降低系统资源占用", "增强异常处理稳定性"]
+        benefits = ["吞吐能力提升", "故障恢复时间缩短", "资源利用率提升"]
 
     keywords = normalize_list(payload.get("keywords"))
     if not keywords:
-        keywords = ["数据处理", "调度", "异常恢复", "并发", "参数优化"]
+        keywords = ["数据处理", "调度", "异常恢复", "并发", "资源优化"]
 
     return {
         "title": title,
@@ -163,51 +155,26 @@ def normalize_parsed_info(payload: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def llm_generate(
-    runtime_backend: str,
-    prompt: str,
-    *,
-    system_prompt: Optional[str] = None,
-    max_tokens: int = 4096,
-    temperature: float = 0.2,
-    timeout_seconds: int = 900,
-) -> str:
-    return generate_text(
-        runtime_backend=runtime_backend,
-        prompt=prompt,
-        system_prompt=system_prompt,
-        max_tokens=max_tokens,
-        temperature=temperature,
-        timeout_seconds=timeout_seconds,
-    )
-
-
 def stage_input_parser(ctx: Dict[str, Any]) -> None:
-    runtime_backend = ctx["runtime_backend"]
     session_dir: Path = ctx["session_dir"]
     input_path: Path = ctx["input_path"]
+    runtime_backend = ctx["runtime_backend"]
 
     stage_dir = session_dir / "01_input"
     stage_dir.mkdir(parents=True, exist_ok=True)
 
-    raw_doc_path = stage_dir / "raw_document.docx"
-    shutil.copy2(input_path, raw_doc_path)
+    raw_docx = stage_dir / "raw_document.docx"
+    shutil.copy2(input_path, raw_docx)
 
-    converter = MarkItDown()
-    conversion = converter.convert(str(raw_doc_path))
-    markdown = (conversion.text_content or "").strip()
+    markdown = MarkItDown().convert(str(raw_docx)).text_content or ""
+    markdown = markdown.strip()
     if not markdown:
-        raise RuntimeError("Failed to extract text from input document")
+        raise RuntimeError("failed to parse input docx")
 
-    raw_markdown_path = stage_dir / "raw_document.md"
-    write_text(raw_markdown_path, markdown)
+    write_text(stage_dir / "raw_document.md", markdown)
 
-    instruction = trim_context(load_agent_instruction("input-parser"), 8000)
-    task_prompt = trim_context(ctx.get("task_prompt", ""), 2000)
-
-    prompt = f"""你是专利文档解析器，请严格输出 JSON（不要输出额外说明）。
-
-目标结构：
+    instruction = trim_text(load_agent_instruction("input-parser"), 6000)
+    prompt = f"""请根据交底书内容提取结构化信息，只输出 JSON：
 {{
   "title": "",
   "technical_problem": "",
@@ -218,51 +185,36 @@ def stage_input_parser(ctx: Dict[str, Any]) -> None:
   "keywords": [""]
 }}
 
-提取要求：
-1. 仅根据文档内容抽取，不要编造事实；缺失可做最小合理补全。
-2. existing_solutions / existing_drawbacks / benefits / keywords 必须是数组。
-3. keywords 提供 5-10 个专业关键词。
+要求：keywords 5-10 个，所有列表字段必须为数组。
 
-附加任务要求（如有）：
-{task_prompt or "无"}
-
-参考执行指令：
+参考指令：
 {instruction}
 
 文档内容：
-{trim_context(markdown, 30000)}
+{trim_text(markdown, 30000)}
 """
 
-    response = llm_generate(
-        runtime_backend,
-        prompt,
-        max_tokens=2400,
-        temperature=0.1,
-    )
-    parsed = extract_json_from_text(response)
+    out = llm(runtime_backend, prompt, max_tokens=2200, temperature=0.1)
+    parsed = extract_json(out)
     if not isinstance(parsed, dict):
-        raise RuntimeError("input-parser did not return valid JSON")
-
-    normalized = normalize_parsed_info(parsed)
-    write_json(stage_dir / "parsed_info.json", normalized)
+        raise RuntimeError("input-parser returned invalid JSON")
+    write_json(stage_dir / "parsed_info.json", normalize_parsed_info(parsed))
 
 
 def stage_patent_searcher(ctx: Dict[str, Any]) -> None:
-    runtime_backend = ctx["runtime_backend"]
     session_dir: Path = ctx["session_dir"]
+    runtime_backend = ctx["runtime_backend"]
+
     parsed_info = read_json(session_dir / "01_input" / "parsed_info.json", {})
+    keywords = normalize_list(parsed_info.get("keywords"))[:6]
+    if not keywords:
+        keywords = ["数据处理", "并发调度", "状态同步"]
 
-    stage_dir = session_dir / "02_research"
-    stage_dir.mkdir(parents=True, exist_ok=True)
-
-    instruction = trim_context(load_agent_instruction("patent-searcher"), 8000)
-    task_prompt = trim_context(ctx.get("task_prompt", ""), 2000)
-
-    prompt = f"""你是专利检索分析助手。在无法直接调用外部检索工具时，请基于技术主题给出“建议检索方向 + 可参考专利类型”的分析结果。
-
-请严格按以下格式输出，且不要输出其他内容：
+    instruction = trim_text(load_agent_instruction("patent-searcher"), 6000)
+    prompt = f"""你是专利检索分析助手。在不可直接访问外部检索时，请基于关键词给出可参考专利方向。
+输出格式：
 <<<SIMILAR_PATENTS_JSON>>>
-[{{"title":"","publication_no":"","country":"CN","relevance":0.9,"key_points":[""],"analysis":""}}]
+[{{"title":"","publication_no":"","country":"CN","relevance":0.8,"key_points":[""],"analysis":""}}]
 <<<END_SIMILAR_PATENTS_JSON>>>
 <<<PRIOR_ART_ANALYSIS_MD>>>
 # 现有技术分析
@@ -273,185 +225,144 @@ def stage_patent_searcher(ctx: Dict[str, Any]) -> None:
 ...
 <<<END_WRITING_STYLE_GUIDE_MD>>>
 
-约束：
-1. similar patents 输出 5-10 条。
-2. 严禁抄袭现有专利原文，重点给“结构和写作风格参考”。
-3. 结论需要支持后续权利要求、说明书撰写。
-
-附加任务要求（如有）：
-{task_prompt or "无"}
-
-参考执行指令：
+关键词：{', '.join(keywords)}
+参考指令：
 {instruction}
-
-输入（parsed_info）：
-{json.dumps(parsed_info, ensure_ascii=False, indent=2)}
 """
 
-    response = llm_generate(runtime_backend, prompt, max_tokens=3800, temperature=0.2)
+    out = llm(runtime_backend, prompt, max_tokens=3000, temperature=0.2)
+    similar_json = extract_json(extract_block(out, "<<<SIMILAR_PATENTS_JSON>>>", "<<<END_SIMILAR_PATENTS_JSON>>>"))
+    analysis_md = extract_block(out, "<<<PRIOR_ART_ANALYSIS_MD>>>", "<<<END_PRIOR_ART_ANALYSIS_MD>>>")
+    style_md = extract_block(out, "<<<WRITING_STYLE_GUIDE_MD>>>", "<<<END_WRITING_STYLE_GUIDE_MD>>>")
 
-    similar_raw = extract_block(response, "<<<SIMILAR_PATENTS_JSON>>>", "<<<END_SIMILAR_PATENTS_JSON>>>")
-    analysis_md = extract_block(response, "<<<PRIOR_ART_ANALYSIS_MD>>>", "<<<END_PRIOR_ART_ANALYSIS_MD>>>")
-    style_md = extract_block(response, "<<<WRITING_STYLE_GUIDE_MD>>>", "<<<END_WRITING_STYLE_GUIDE_MD>>>")
+    similar: List[Dict[str, Any]] = []
+    if isinstance(similar_json, list):
+        for item in similar_json[:10]:
+            if not isinstance(item, dict):
+                continue
+            similar.append(
+                {
+                    "title": str(item.get("title", "未命名参考专利")).strip() or "未命名参考专利",
+                    "publication_no": str(item.get("publication_no", "N/A")).strip() or "N/A",
+                    "country": str(item.get("country", "CN")).strip() or "CN",
+                    "relevance": float(item.get("relevance", 0.6)),
+                    "key_points": normalize_list(item.get("key_points"))[:6],
+                    "analysis": str(item.get("analysis", "")).strip(),
+                }
+            )
 
-    similar_data = extract_json_from_text(similar_raw)
-    if not isinstance(similar_data, list):
-        similar_data = []
-
-    normalized_similar: List[Dict[str, Any]] = []
-    for item in similar_data[:10]:
-        if not isinstance(item, dict):
-            continue
-        normalized_similar.append(
+    if not similar:
+        similar = [
             {
-                "title": str(item.get("title", "未命名参考专利")).strip() or "未命名参考专利",
-                "publication_no": str(item.get("publication_no", "N/A")).strip() or "N/A",
-                "country": str(item.get("country", "CN")).strip() or "CN",
-                "relevance": float(item.get("relevance", 0.6)) if str(item.get("relevance", "")).strip() else 0.6,
-                "key_points": normalize_list(item.get("key_points"))[:6],
-                "analysis": str(item.get("analysis", "")).strip(),
-            }
-        )
-
-    if not normalized_similar:
-        keywords = normalize_list(parsed_info.get("keywords"))
-        normalized_similar = [
-            {
-                "title": f"面向{keyword}的改进型技术方案",
-                "publication_no": f"CN-REF-{idx + 1:03d}",
+                "title": f"面向{kw}的改进型技术方案",
+                "publication_no": f"CN-REF-{i+1:03d}",
                 "country": "CN",
                 "relevance": 0.65,
                 "key_points": ["流程模块化", "可扩展处理", "稳定性增强"],
-                "analysis": "可用于学习背景技术与有益效果写法。",
+                "analysis": "用于学习写作风格与结构组织。",
             }
-            for idx, keyword in enumerate(keywords[:5] or ["数据处理", "系统架构", "异常恢复", "并发控制", "资源调度"])
+            for i, kw in enumerate(keywords[:5])
         ]
 
-    if not analysis_md.strip():
-        analysis_md = "# 现有技术分析\n\n未获取到外部检索结果，已基于输入技术主题生成检索方向与对比思路。"
+    if not analysis_md:
+        analysis_md = "# 现有技术分析\n\n未获取到外部检索结果，已给出主题相关方向与对比思路。"
+    if not style_md:
+        style_md = "# 写作风格建议\n\n- 法律化客观表达\n- 步骤与模块编号对应\n- 术语保持一致"
 
-    if not style_md.strip():
-        style_md = "# 写作风格建议\n\n- 使用客观、法律化语句\n- 强化步骤编号、模块编号\n- 保持术语前后一致"
-
-    write_json(stage_dir / "similar_patents.json", normalized_similar)
+    stage_dir = session_dir / "02_research"
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    write_json(stage_dir / "similar_patents.json", similar)
     write_text(stage_dir / "prior_art_analysis.md", analysis_md.strip() + "\n")
     write_text(stage_dir / "writing_style_guide.md", style_md.strip() + "\n")
 
 
 def stage_outline_generator(ctx: Dict[str, Any]) -> None:
-    runtime_backend = ctx["runtime_backend"]
     session_dir: Path = ctx["session_dir"]
+    runtime_backend = ctx["runtime_backend"]
 
-    parsed_info = read_json(session_dir / "01_input" / "parsed_info.json", {})
-    similar_patents = read_json(session_dir / "02_research" / "similar_patents.json", [])
-    patent_guide = trim_context(read_text(PATENT_GUIDE_PATH), 16000)
-    skill_guide = trim_context(read_text(PATENT_SKILL_PATH), 12000)
-    instruction = trim_context(load_agent_instruction("outline-generator"), 8000)
-    task_prompt = trim_context(ctx.get("task_prompt", ""), 2000)
+    parsed = read_json(session_dir / "01_input" / "parsed_info.json", {})
+    similar = read_json(session_dir / "02_research" / "similar_patents.json", [])
+    guide = trim_text(read_text(PATENT_GUIDE_PATH), 12000)
+    skill = trim_text(read_text(PATENT_SKILL_PATH), 12000)
+    instruction = trim_text(load_agent_instruction("outline-generator"), 6000)
 
-    prompt = f"""你是专利大纲设计专家。请输出两个区块，不要输出其他内容：
-
+    prompt = f"""请输出两个区块：
 <<<PATENT_OUTLINE_MD>>>
 # 专利大纲
 ...
 <<<END_PATENT_OUTLINE_MD>>>
-
 <<<STRUCTURE_MAPPING_JSON>>>
-{{
-  "patent_title": "",
-  "sections": [
-    {{"id":"01_abstract","title":"说明书摘要","min_words":200,"max_words":300,"requirements":[""]}}
-  ]
-}}
+{{"patent_title":"","sections":[]}}
 <<<END_STRUCTURE_MAPPING_JSON>>>
 
-要求：
-1. 结构必须覆盖摘要、权利要求书、说明书全章节。
-2. 明确“具体实施方式”min_words >= 10000。
-3. 权利要求保护维度覆盖方法、装置/系统、设备、存储介质。
-4. section id 使用稳定英文下划线命名。
+要求：必须包含摘要、权利要求、说明书各章；具体实施方式 min_words >=10000。
 
-附加任务要求（如有）：
-{task_prompt or "无"}
-
-参考执行指令：
+参考指令：
 {instruction}
 
-专利写作指南（节选）：
-{patent_guide}
-
-专利技能规范（节选）：
-{skill_guide}
-
-输入 parsed_info：
-{json.dumps(parsed_info, ensure_ascii=False, indent=2)}
-
-输入 similar_patents（摘要）：
-{json.dumps(similar_patents[:6], ensure_ascii=False, indent=2)}
-"""
-
-    response = llm_generate(runtime_backend, prompt, max_tokens=5000, temperature=0.2)
-
-    outline_md = extract_block(response, "<<<PATENT_OUTLINE_MD>>>", "<<<END_PATENT_OUTLINE_MD>>>")
-    structure_raw = extract_block(
-        response,
-        "<<<STRUCTURE_MAPPING_JSON>>>",
-        "<<<END_STRUCTURE_MAPPING_JSON>>>",
-    )
-
-    structure_json = extract_json_from_text(structure_raw)
-    if not isinstance(structure_json, dict):
-        raise RuntimeError("outline-generator did not return valid structure_mapping JSON")
-
-    stage_dir = session_dir / "03_outline"
-    stage_dir.mkdir(parents=True, exist_ok=True)
-
-    if not outline_md.strip():
-        outline_md = f"# 专利大纲\n\n- 专利名称：{parsed_info.get('title', '待定')}\n- 包含摘要、权利要求书、说明书及附图。"
-
-    write_text(stage_dir / "patent_outline.md", outline_md.strip() + "\n")
-    write_json(stage_dir / "structure_mapping.json", structure_json)
-
-
-def stage_abstract_writer(ctx: Dict[str, Any]) -> None:
-    runtime_backend = ctx["runtime_backend"]
-    session_dir: Path = ctx["session_dir"]
-
-    parsed_info = read_json(session_dir / "01_input" / "parsed_info.json", {})
-    outline_md = read_text(session_dir / "03_outline" / "patent_outline.md")
-    guide = trim_context(read_text(PATENT_GUIDE_PATH), 12000)
-    skill_guide = trim_context(read_text(PATENT_SKILL_PATH), 10000)
-    instruction = trim_context(load_agent_instruction("abstract-writer"), 6000)
-    task_prompt = trim_context(ctx.get("task_prompt", ""), 1500)
-
-    prompt = f"""请撰写中国专利说明书摘要，要求：
-1. 必须以“本申请公开了”开头。
-2. 不超过300字。
-3. 包含技术问题、技术方案、有益效果。
-4. 法律语言准确，无宣传措辞。
-5. 仅输出摘要正文。
-
-附加任务要求（如有）：
-{task_prompt or "无"}
-
-参考执行指令：
-{instruction}
+技能规范（节选）：
+{skill}
 
 写作指南（节选）：
 {guide}
 
-专利技能规范（节选）：
-{skill_guide}
-
-输入信息：
-parsed_info={json.dumps(parsed_info, ensure_ascii=False, indent=2)}
-
-大纲：
-{trim_context(outline_md, 12000)}
+输入：
+parsed={json.dumps(parsed, ensure_ascii=False, indent=2)}
+similar={json.dumps(similar[:6], ensure_ascii=False, indent=2)}
 """
 
-    response = llm_generate(runtime_backend, prompt, max_tokens=900, temperature=0.1)
-    abstract = response.strip()
+    out = llm(runtime_backend, prompt, max_tokens=4200, temperature=0.2)
+    outline_md = extract_block(out, "<<<PATENT_OUTLINE_MD>>>", "<<<END_PATENT_OUTLINE_MD>>>")
+    mapping_json = extract_json(extract_block(out, "<<<STRUCTURE_MAPPING_JSON>>>", "<<<END_STRUCTURE_MAPPING_JSON>>>"))
+
+    if not outline_md:
+        outline_md = "# 专利大纲\n\n- 说明书摘要（<=300字）\n- 权利要求书\n- 说明书（技术领域、背景技术、发明内容、附图说明、具体实施方式>10000字）"
+    if not isinstance(mapping_json, dict):
+        mapping_json = {
+            "patent_title": str(parsed.get("title", "一种数据处理方法、装置、设备及存储介质")),
+            "sections": [
+                {"id": "01_abstract", "title": "说明书摘要", "max_words": 300},
+                {"id": "02_claims", "title": "权利要求书"},
+                {"id": "03_tech_field", "title": "技术领域", "min_words": 200},
+                {"id": "03_background", "title": "背景技术", "min_words": 1000},
+                {"id": "03_summary", "title": "发明内容", "min_words": 1500},
+                {"id": "03_drawings", "title": "附图说明", "min_words": 300},
+                {"id": "03_embodiments", "title": "具体实施方式", "min_words": 10000},
+            ],
+        }
+
+    stage_dir = session_dir / "03_outline"
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    write_text(stage_dir / "patent_outline.md", outline_md.strip() + "\n")
+    write_json(stage_dir / "structure_mapping.json", mapping_json)
+
+
+def stage_abstract_writer(ctx: Dict[str, Any]) -> None:
+    session_dir: Path = ctx["session_dir"]
+    runtime_backend = ctx["runtime_backend"]
+
+    parsed = read_json(session_dir / "01_input" / "parsed_info.json", {})
+    outline_md = read_text(session_dir / "03_outline" / "patent_outline.md")
+    instruction = trim_text(load_agent_instruction("abstract-writer"), 5000)
+
+    prompt = f"""请撰写中文专利摘要，要求：
+1) 必须以“本申请公开了”开头
+2) 不超过300字
+3) 包含技术问题、技术方案、有益效果
+4) 仅输出摘要正文
+
+参考指令：
+{instruction}
+
+输入：
+{json.dumps(parsed, ensure_ascii=False, indent=2)}
+
+大纲：
+{trim_text(outline_md, 10000)}
+"""
+
+    out = llm(runtime_backend, prompt, max_tokens=900, temperature=0.1)
+    abstract = out.strip()
     if not abstract.startswith("本申请公开了"):
         abstract = "本申请公开了" + abstract.lstrip("，,。 .")
     if len(abstract) > 320:
@@ -461,217 +372,141 @@ parsed_info={json.dumps(parsed_info, ensure_ascii=False, indent=2)}
 
 
 def stage_claims_writer(ctx: Dict[str, Any]) -> None:
-    runtime_backend = ctx["runtime_backend"]
     session_dir: Path = ctx["session_dir"]
+    runtime_backend = ctx["runtime_backend"]
 
-    parsed_info = read_json(session_dir / "01_input" / "parsed_info.json", {})
+    parsed = read_json(session_dir / "01_input" / "parsed_info.json", {})
     outline_md = read_text(session_dir / "03_outline" / "patent_outline.md")
     abstract_md = read_text(session_dir / "04_content" / "abstract.md")
-    guide = trim_context(read_text(PATENT_GUIDE_PATH), 12000)
-    skill_guide = trim_context(read_text(PATENT_SKILL_PATH), 10000)
-    instruction = trim_context(load_agent_instruction("claims-writer"), 7000)
-    task_prompt = trim_context(ctx.get("task_prompt", ""), 1500)
+    instruction = trim_text(load_agent_instruction("claims-writer"), 6000)
 
-    prompt = f"""请生成专利权利要求书 Markdown，要求：
-1. 至少包含：方法独立权利要求1项+方法从属5-10项+装置/系统独立1项+装置从属3-5项+电子设备独立1项+存储介质独立1项。
-2. 使用规范句式：
-   - "1. 一种...方法，其特征在于，包括："
-   - "2. 根据权利要求1所述的方法，其特征在于，..."
-3. 方法步骤使用分号（；）分隔。
-4. 术语与摘要、大纲一致。
-5. 仅输出最终 Markdown 内容。
+    prompt = f"""请输出专利权利要求书 Markdown，要求：
+- 包含方法独权+从权，装置独权+从权，设备独权，介质独权
+- 方法权利要求步骤用分号（；）分隔
+- 句式符合法律文本
+- 只输出最终 Markdown
 
-附加任务要求（如有）：
-{task_prompt or "无"}
-
-参考执行指令：
+参考指令：
 {instruction}
 
-写作指南（节选）：
-{guide}
+输入：
+parsed={json.dumps(parsed, ensure_ascii=False, indent=2)}
 
-专利技能规范（节选）：
-{skill_guide}
+abstract={abstract_md}
 
-输入 parsed_info：
-{json.dumps(parsed_info, ensure_ascii=False, indent=2)}
-
-摘要：
-{abstract_md}
-
-大纲：
-{trim_context(outline_md, 12000)}
+outline={trim_text(outline_md, 10000)}
 """
 
-    claims_md = llm_generate(runtime_backend, prompt, max_tokens=4200, temperature=0.2).strip()
-    if not re.search(r"^\s*1\.", claims_md, flags=re.MULTILINE):
-        claims_md = "1. 一种数据处理方法，其特征在于，包括：\n获取输入数据；\n执行目标处理流程；\n输出处理结果。\n\n" + claims_md
+    out = llm(runtime_backend, prompt, max_tokens=4000, temperature=0.2).strip()
+    if not re.search(r"^\s*1\.", out, flags=re.MULTILINE):
+        out = (
+            "1. 一种数据处理方法，其特征在于，包括：\n"
+            "获取待处理数据；\n"
+            "执行目标处理流程；\n"
+            "输出处理结果。\n\n" + out
+        )
 
-    write_text(session_dir / "04_content" / "claims.md", claims_md + "\n")
+    write_text(session_dir / "04_content" / "claims.md", out + "\n")
 
 
-def generate_long_section(
-    runtime_backend: str,
-    heading: str,
-    min_chars: int,
-    context_prompt: str,
-    *,
-    max_tokens: int = 3200,
-) -> str:
-    prompt = f"""请仅输出“{heading}”章节正文，不要输出其他标题。
+def _generate_long_section(runtime_backend: str, heading: str, min_chars: int, context: str) -> str:
+    prompt = f"""请仅输出“{heading}”章节正文。
 要求：
-1. 中文技术写作风格，法律化、客观、可实施。
-2. 术语与上下文保持一致。
-3. 最少 {min_chars} 个中文字符。
+- 术语一致
+- 中文技术写作
+- 最少 {min_chars} 个中文字符
 
 上下文：
-{context_prompt}
+{context}
 """
 
-    text = llm_generate(
-        runtime_backend,
-        prompt,
-        max_tokens=max_tokens,
-        temperature=0.25,
-        timeout_seconds=1200,
-    ).strip()
-
-    compressed_len = len(re.sub(r"\s+", "", text))
-    if compressed_len < min_chars:
-        expand_prompt = f"""请在不改变原有技术逻辑的前提下，扩写以下内容并补齐到至少 {min_chars} 个中文字符。
-只输出扩写后的完整正文：
-{text}
-"""
-        text = llm_generate(
-            runtime_backend,
-            expand_prompt,
-            max_tokens=max_tokens,
-            temperature=0.3,
-            timeout_seconds=1200,
-        ).strip()
+    text = llm(runtime_backend, prompt, max_tokens=3200, temperature=0.25, timeout_seconds=1200).strip()
+    if len(re.sub(r"\s+", "", text)) < min_chars:
+        expand = f"请在不改变技术逻辑前提下扩写到至少 {min_chars} 个中文字符，仅输出最终正文：\n{text}"
+        text = llm(runtime_backend, expand, max_tokens=3200, temperature=0.3, timeout_seconds=1200).strip()
     return text
 
 
 def stage_description_writer(ctx: Dict[str, Any]) -> None:
-    runtime_backend = ctx["runtime_backend"]
     session_dir: Path = ctx["session_dir"]
+    runtime_backend = ctx["runtime_backend"]
 
-    parsed_info = read_json(session_dir / "01_input" / "parsed_info.json", {})
-    outline_md = read_text(session_dir / "03_outline" / "patent_outline.md")
-    abstract_md = read_text(session_dir / "04_content" / "abstract.md")
-    claims_md = read_text(session_dir / "04_content" / "claims.md")
-    prior_art_md = read_text(session_dir / "02_research" / "prior_art_analysis.md")
-    guide = trim_context(read_text(PATENT_GUIDE_PATH), 18000)
-    skill_guide = trim_context(read_text(PATENT_SKILL_PATH), 14000)
-    instruction = trim_context(load_agent_instruction("description-writer"), 9000)
-    task_prompt = trim_context(ctx.get("task_prompt", ""), 2000)
+    parsed = read_json(session_dir / "01_input" / "parsed_info.json", {})
+    outline = read_text(session_dir / "03_outline" / "patent_outline.md")
+    abstract = read_text(session_dir / "04_content" / "abstract.md")
+    claims = read_text(session_dir / "04_content" / "claims.md")
+    prior = read_text(session_dir / "02_research" / "prior_art_analysis.md")
+    skill = trim_text(read_text(PATENT_SKILL_PATH), 12000)
+    guide = trim_text(read_text(PATENT_GUIDE_PATH), 12000)
+    instruction = trim_text(load_agent_instruction("description-writer"), 7000)
 
-    common_context = trim_context(
+    ctx_text = trim_text(
         "\n\n".join(
             [
-                f"parsed_info:\n{json.dumps(parsed_info, ensure_ascii=False, indent=2)}",
-                f"outline:\n{outline_md}",
-                f"abstract:\n{abstract_md}",
-                f"claims:\n{claims_md}",
-                f"prior_art:\n{prior_art_md}",
-                f"task_prompt:\n{task_prompt or '无'}",
-                f"instruction:\n{instruction}",
-                f"guide:\n{guide}",
-                f"skill_guide:\n{skill_guide}",
+                f"parsed={json.dumps(parsed, ensure_ascii=False, indent=2)}",
+                f"outline={outline}",
+                f"abstract={abstract}",
+                f"claims={claims}",
+                f"prior={prior}",
+                f"skill={skill}",
+                f"guide={guide}",
+                f"instruction={instruction}",
             ]
         ),
         30000,
     )
 
-    tech_field = generate_long_section(
-        runtime_backend,
-        "技术领域",
-        220,
-        common_context,
-        max_tokens=1200,
-    )
-    background = generate_long_section(
-        runtime_backend,
-        "背景技术",
-        1600,
-        common_context,
-        max_tokens=2600,
-    )
-    invention_content = generate_long_section(
-        runtime_backend,
-        "发明内容",
-        2000,
-        common_context,
-        max_tokens=3000,
-    )
-    drawing_desc = generate_long_section(
-        runtime_backend,
-        "附图说明",
-        380,
-        common_context,
-        max_tokens=1400,
-    )
-    embodiments_part1 = generate_long_section(
-        runtime_backend,
-        "具体实施方式（实施例一）",
-        3800,
-        common_context,
-        max_tokens=3600,
-    )
-    embodiments_part2 = generate_long_section(
-        runtime_backend,
-        "具体实施方式（实施例二及变体）",
-        3800,
-        common_context,
-        max_tokens=3600,
-    )
+    tech = _generate_long_section(runtime_backend, "技术领域", 220, ctx_text)
+    bg = _generate_long_section(runtime_backend, "背景技术", 1500, ctx_text)
+    summary = _generate_long_section(runtime_backend, "发明内容", 1800, ctx_text)
+    drawing = _generate_long_section(runtime_backend, "附图说明", 360, ctx_text)
+    impl_a = _generate_long_section(runtime_backend, "具体实施方式（实施例一）", 3600, ctx_text)
+    impl_b = _generate_long_section(runtime_backend, "具体实施方式（实施例二）", 3600, ctx_text)
 
     description = (
         "## 技术领域\n\n"
-        + tech_field.strip()
+        + tech
         + "\n\n## 背景技术\n\n"
-        + background.strip()
+        + bg
         + "\n\n## 发明内容\n\n"
-        + invention_content.strip()
+        + summary
         + "\n\n## 附图说明\n\n"
-        + drawing_desc.strip()
+        + drawing
         + "\n\n## 具体实施方式\n\n"
-        + embodiments_part1.strip()
+        + impl_a
         + "\n\n"
-        + embodiments_part2.strip()
+        + impl_b
         + "\n"
     )
 
-    size_no_space = len(re.sub(r"\s+", "", description))
-    if size_no_space < 10000:
-        expansion_prompt = f"""以下是专利说明书草稿，当前长度不足。请在保持术语一致和逻辑完整的前提下扩写“具体实施方式”部分，输出完整的说明书 Markdown。
-
-{description}
-"""
-        expanded = llm_generate(
-            runtime_backend,
-            expansion_prompt,
-            max_tokens=3800,
-            temperature=0.25,
-            timeout_seconds=1200,
-        ).strip()
+    if len(re.sub(r"\s+", "", description)) < 10000:
+        expand = (
+            "以下说明书长度不足，请扩写‘具体实施方式’使总长度超过10000中文字符。"
+            "输出完整 Markdown：\n\n" + description
+        )
+        expanded = llm(runtime_backend, expand, max_tokens=3800, temperature=0.25, timeout_seconds=1200).strip()
         if expanded:
             description = expanded
 
     write_text(session_dir / "04_content" / "description.md", description.strip() + "\n")
 
 
+def _extract_mermaid_block(text: str) -> str:
+    m = re.search(r"```mermaid\s*(.*?)```", text, flags=re.DOTALL | re.IGNORECASE)
+    if not m:
+        return ""
+    return m.group(1).strip()
+
+
 def stage_diagram_generator(ctx: Dict[str, Any]) -> None:
-    runtime_backend = ctx["runtime_backend"]
     session_dir: Path = ctx["session_dir"]
+    runtime_backend = ctx["runtime_backend"]
 
-    description_md = read_text(session_dir / "04_content" / "description.md")
-    structure_mapping = read_json(session_dir / "03_outline" / "structure_mapping.json", {})
-    skill_guide = trim_context(read_text(PATENT_SKILL_PATH), 8000)
-    instruction = trim_context(load_agent_instruction("diagram-generator"), 7000)
-    task_prompt = trim_context(ctx.get("task_prompt", ""), 1200)
+    description = read_text(session_dir / "04_content" / "description.md")
+    mapping = read_json(session_dir / "03_outline" / "structure_mapping.json", {})
+    instruction = trim_text(load_agent_instruction("diagram-generator"), 5000)
 
-    prompt = f"""请输出三个 Mermaid 图，且仅输出以下结构：
+    prompt = f"""请输出三段 Mermaid，格式如下：
 <<<FLOWCHART_MERMAID>>>
 ```mermaid
 ...
@@ -688,65 +523,31 @@ def stage_diagram_generator(ctx: Dict[str, Any]) -> None:
 ```
 <<<END_SYSTEM_MERMAID>>>
 
-要求：
-1. 流程图使用 graph TD，步骤编号使用 S101/S102...。
-2. 装置图使用 graph TB，模块编号使用 201/202...。
-3. 系统图使用 graph LR，体现端-服务-存储协作。
-4. 与说明书术语保持一致。
+要求：流程图 graph TD；装置图 graph TB；系统图 graph LR。
 
-附加任务要求（如有）：
-{task_prompt or "无"}
-
-参考执行指令：
+参考指令：
 {instruction}
 
-专利技能规范（节选）：
-{skill_guide}
-
-输入 structure_mapping：
-{json.dumps(structure_mapping, ensure_ascii=False, indent=2)}
-
-输入 description（节选）：
-{trim_context(description_md, 18000)}
+输入 mapping：{json.dumps(mapping, ensure_ascii=False, indent=2)}
+输入 description：{trim_text(description, 15000)}
 """
 
-    response = llm_generate(runtime_backend, prompt, max_tokens=2600, temperature=0.2)
+    out = llm(runtime_backend, prompt, max_tokens=2400, temperature=0.2)
 
-    flow_block = extract_block(response, "<<<FLOWCHART_MERMAID>>>", "<<<END_FLOWCHART_MERMAID>>>")
-    device_block = extract_block(response, "<<<DEVICE_MERMAID>>>", "<<<END_DEVICE_MERMAID>>>")
-    system_block = extract_block(response, "<<<SYSTEM_MERMAID>>>", "<<<END_SYSTEM_MERMAID>>>")
+    flow = _extract_mermaid_block(extract_block(out, "<<<FLOWCHART_MERMAID>>>", "<<<END_FLOWCHART_MERMAID>>>"))
+    device = _extract_mermaid_block(extract_block(out, "<<<DEVICE_MERMAID>>>", "<<<END_DEVICE_MERMAID>>>"))
+    system = _extract_mermaid_block(extract_block(out, "<<<SYSTEM_MERMAID>>>", "<<<END_SYSTEM_MERMAID>>>"))
 
-    flow_mmd = extract_first_mermaid_block(flow_block) or (
-        "graph TD\n"
-        "    A[S101: 获取待处理数据] --> B[S102: 执行特征分析]\n"
-        "    B --> C[S103: 进行策略决策]\n"
-        "    C --> D[S104: 输出处理结果]"
-    )
-    device_mmd = extract_first_mermaid_block(device_block) or (
-        "graph TB\n"
-        "    subgraph 数据处理装置 200\n"
-        "        M201[获取模块 201]\n"
-        "        M202[分析模块 202]\n"
-        "        M203[决策模块 203]\n"
-        "        M204[输出模块 204]\n"
-        "    end\n"
-        "    M201 --> M202 --> M203 --> M204"
-    )
-    system_mmd = extract_first_mermaid_block(system_block) or (
-        "graph LR\n"
-        "    C[客户端] --> G[网关服务]\n"
-        "    G --> S[核心处理服务]\n"
-        "    S --> D[(存储系统)]\n"
-        "    S --> M[监控与告警系统]"
-    )
+    if not flow:
+        flow = "graph TD\n    A[S101: 获取数据] --> B[S102: 处理数据] --> C[S103: 输出结果]"
+    if not device:
+        device = "graph TB\n    M201[获取模块 201] --> M202[处理模块 202] --> M203[输出模块 203]"
+    if not system:
+        system = "graph LR\n    C[客户端] --> S[服务节点] --> D[(存储系统)]"
 
-    flow_path = session_dir / "05_diagrams" / "flowcharts" / "method_flowchart.mmd"
-    device_path = session_dir / "05_diagrams" / "structural_diagrams" / "device_structure.mmd"
-    system_path = session_dir / "05_diagrams" / "sequence_diagrams" / "system_architecture.mmd"
-
-    write_text(flow_path, flow_mmd.strip() + "\n")
-    write_text(device_path, device_mmd.strip() + "\n")
-    write_text(system_path, system_mmd.strip() + "\n")
+    write_text(session_dir / "05_diagrams" / "flowcharts" / "method_flowchart.mmd", flow + "\n")
+    write_text(session_dir / "05_diagrams" / "structural_diagrams" / "device_structure.mmd", device + "\n")
+    write_text(session_dir / "05_diagrams" / "sequence_diagrams" / "system_architecture.mmd", system + "\n")
 
     figures_md = "\n".join(
         [
@@ -763,17 +564,15 @@ def stage_diagram_generator(ctx: Dict[str, Any]) -> None:
 
 def stage_markdown_merger(ctx: Dict[str, Any]) -> None:
     session_dir: Path = ctx["session_dir"]
-    parsed_info = read_json(session_dir / "01_input" / "parsed_info.json", {})
+    parsed = read_json(session_dir / "01_input" / "parsed_info.json", {})
 
-    title = str(parsed_info.get("title", "一种数据处理方法、装置、设备及存储介质")).strip()
-
-    abstract_md = read_text(session_dir / "04_content" / "abstract.md")
-    claims_md = read_text(session_dir / "04_content" / "claims.md")
-    description_md = read_text(session_dir / "04_content" / "description.md")
-
-    flow_mmd = read_text(session_dir / "05_diagrams" / "flowcharts" / "method_flowchart.mmd")
-    device_mmd = read_text(session_dir / "05_diagrams" / "structural_diagrams" / "device_structure.mmd")
-    system_mmd = read_text(session_dir / "05_diagrams" / "sequence_diagrams" / "system_architecture.mmd")
+    title = str(parsed.get("title", "一种数据处理方法、装置、设备及存储介质")).strip()
+    abstract = read_text(session_dir / "04_content" / "abstract.md")
+    claims = read_text(session_dir / "04_content" / "claims.md")
+    description = read_text(session_dir / "04_content" / "description.md")
+    flow = read_text(session_dir / "05_diagrams" / "flowcharts" / "method_flowchart.mmd")
+    device = read_text(session_dir / "05_diagrams" / "structural_diagrams" / "device_structure.mmd")
+    system = read_text(session_dir / "05_diagrams" / "sequence_diagrams" / "system_architecture.mmd")
 
     final_md = f"""# {title}
 
@@ -787,19 +586,19 @@ def stage_markdown_merger(ctx: Dict[str, Any]) -> None:
 
 ## 说明书摘要
 
-{abstract_md.strip()}
+{abstract.strip()}
 
 ---
 
 ## 权利要求书
 
-{claims_md.strip()}
+{claims.strip()}
 
 ---
 
 ## 说明书
 
-{description_md.strip()}
+{description.strip()}
 
 ---
 
@@ -808,19 +607,19 @@ def stage_markdown_merger(ctx: Dict[str, Any]) -> None:
 ### 图1 方法流程图
 
 ```mermaid
-{flow_mmd.strip()}
+{flow.strip()}
 ```
 
 ### 图2 装置结构图
 
 ```mermaid
-{device_mmd.strip()}
+{device.strip()}
 ```
 
 ### 图3 系统架构图
 
 ```mermaid
-{system_mmd.strip()}
+{system.strip()}
 ```
 """
 
@@ -828,8 +627,8 @@ def stage_markdown_merger(ctx: Dict[str, Any]) -> None:
     final_dir.mkdir(parents=True, exist_ok=True)
     write_text(final_dir / "complete_patent.md", final_md.strip() + "\n")
 
-    description_len = len(re.sub(r"\s+", "", description_md))
-    summary_md = "\n".join(
+    description_len = len(re.sub(r"\s+", "", description))
+    summary = "\n".join(
         [
             "# 生成摘要",
             "",
@@ -842,11 +641,11 @@ def stage_markdown_merger(ctx: Dict[str, Any]) -> None:
             "",
         ]
     )
-    write_text(final_dir / "summary_report.md", summary_md)
+    write_text(final_dir / "summary_report.md", summary)
 
 
-def validate_stage_outputs(session_dir: Path, stage_name: str) -> None:
-    required_outputs: Dict[str, List[Path]] = {
+def validate_stage_outputs(session_dir: Path, stage: str) -> None:
+    required: Dict[str, List[Path]] = {
         "input-parser": [session_dir / "01_input" / "parsed_info.json"],
         "patent-searcher": [
             session_dir / "02_research" / "similar_patents.json",
@@ -868,44 +667,40 @@ def validate_stage_outputs(session_dir: Path, stage_name: str) -> None:
         "markdown-merger": [session_dir / "06_final" / "complete_patent.md"],
     }
 
-    expected = required_outputs.get(stage_name, [])
-    missing = [str(path) for path in expected if not path.exists()]
+    missing = [str(p) for p in required.get(stage, []) if not p.exists()]
     if missing:
-        raise RuntimeError(f"Stage {stage_name} missing outputs: {', '.join(missing)}")
+        raise RuntimeError(f"Stage {stage} missing outputs: {', '.join(missing)}")
 
 
-def run_stage_with_retry(
+def run_stage(
     ctx: Dict[str, Any],
     stage_name: str,
-    stage_fn: Any,
-    *,
-    max_retries: int,
+    fn: Callable[[Dict[str, Any]], None],
+    retries: int,
 ) -> None:
     session_dir: Path = ctx["session_dir"]
-    error_log_path = session_dir / f"{stage_name}_error.log"
+    error_log = session_dir / f"{stage_name}_error.log"
 
-    for attempt in range(1, max_retries + 1):
-        log(f"[{stage_name}] attempt {attempt}/{max_retries} started")
+    for attempt in range(1, retries + 1):
+        log(f"[{stage_name}] attempt {attempt}/{retries} started")
         try:
-            stage_fn(ctx)
+            fn(ctx)
             validate_stage_outputs(session_dir, stage_name)
             log(f"[{stage_name}] completed")
             return
         except Exception as exc:  # noqa: BLE001
             trace = traceback.format_exc()
             log(f"[{stage_name}] failed on attempt {attempt}: {exc}")
-            with error_log_path.open("a", encoding="utf-8") as handle:
-                handle.write(
-                    f"\n=== [{datetime.now().isoformat(timespec='seconds')}] attempt {attempt}/{max_retries} ===\n"
-                )
-                handle.write(trace)
+            with error_log.open("a", encoding="utf-8") as h:
+                h.write(f"\n=== [{datetime.now().isoformat(timespec='seconds')}] attempt {attempt}/{retries} ===\n")
+                h.write(trace)
                 if not trace.endswith("\n"):
-                    handle.write("\n")
-            if attempt >= max_retries:
+                    h.write("\n")
+            if attempt >= retries:
                 raise
 
 
-def build_stage_plan() -> List[Tuple[str, Any]]:
+def stage_plan() -> List[Tuple[str, Callable[[Dict[str, Any]], None]]]:
     return [
         ("input-parser", stage_input_parser),
         ("patent-searcher", stage_patent_searcher),
@@ -944,35 +739,20 @@ def prepare_workspace(session_id: str, input_path: Path) -> Path:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run patent writing pipeline without external AI CLI")
-    parser.add_argument("--session-id", required=True, help="UUID session id")
-    parser.add_argument("--input-path", required=True, help="Input disclosure .docx path")
-    parser.add_argument(
-        "--runtime-backend",
-        default=DEFAULT_RUNTIME_BACKEND,
-        choices=["anthropic", "openai"],
-        help="Runtime backend for direct API calls",
-    )
-    parser.add_argument(
-        "--task-prompt",
-        default="",
-        help="Optional prompt override / extra constraints",
-    )
-    parser.add_argument(
-        "--max-stage-retries",
-        type=int,
-        default=3,
-        help="Maximum retries for each stage",
-    )
+    parser.add_argument("--session-id", required=True)
+    parser.add_argument("--input-path", required=True)
+    parser.add_argument("--runtime-backend", default=DEFAULT_RUNTIME_BACKEND, choices=["anthropic", "openai"])
+    parser.add_argument("--task-prompt", default="")
+    parser.add_argument("--max-stage-retries", type=int, default=3)
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
 
-    runtime_backend = args.runtime_backend
-    if not is_runtime_available(runtime_backend):
-        hint = runtime_setup_hint(runtime_backend)
-        raise SystemExit(f"Runtime backend '{runtime_backend}' is not ready. {hint}")
+    backend = args.runtime_backend
+    if not is_runtime_available(backend):
+        raise SystemExit(f"Runtime backend '{backend}' is not ready. {runtime_setup_hint(backend)}")
 
     input_path = Path(args.input_path).expanduser()
     if not input_path.is_absolute():
@@ -981,26 +761,21 @@ def main() -> int:
     session_dir = prepare_workspace(args.session_id, input_path)
 
     log(f"Session: {args.session_id}")
-    log(f"Runtime backend: {runtime_backend} ({get_runtime_label(runtime_backend)})")
+    log(f"Runtime backend: {backend} ({get_runtime_label(backend)})")
     log(f"Input: {input_path}")
     log(f"Workspace: {session_dir}")
 
-    context: Dict[str, Any] = {
+    ctx: Dict[str, Any] = {
         "session_id": args.session_id,
-        "runtime_backend": runtime_backend,
+        "runtime_backend": backend,
         "input_path": input_path,
         "session_dir": session_dir,
         "task_prompt": args.task_prompt,
     }
 
-    plan = build_stage_plan()
-    for stage_name, stage_fn in plan:
-        run_stage_with_retry(
-            context,
-            stage_name,
-            stage_fn,
-            max_retries=max(1, int(args.max_stage_retries)),
-        )
+    retries = max(1, int(args.max_stage_retries))
+    for name, fn in stage_plan():
+        run_stage(ctx, name, fn, retries)
 
     final_path = session_dir / "06_final" / "complete_patent.md"
     log(f"Pipeline completed successfully. Final output: {final_path}")

@@ -4,97 +4,112 @@ This file provides guidance when working with code in this repository.
 
 ## 项目概述
 
-专利写作多智能体系统（PatentWriterAgent）：基于子代理（subagent）架构，将技术交底书（.docx）自动转换为符合中国《专利法》规范的完整专利申请文件。
+PatentWriterAgent 是专利写作多智能体系统，将技术交底书（.docx）自动转换为符合中国《专利法》规范的完整专利申请文件。采用**单分支双运行时架构**，同一套代码支持 CLI runtime（claude/codex/gemini）和 Native runtime（Anthropic/OpenAI Python SDK）。
 
 ## 开发命令
 
 ```bash
-# 环境安装
-pip install -r requirements.txt
-
-# 配置（至少配置一个模型后端）
-# Anthropic-compatible
-export ANTHROPIC_API_KEY=xxxx
-# 或使用兼容网关：ANTHROPIC_BASE_URL / ANTHROPIC_MODEL
-
-# OpenAI-compatible
-# export OPENAI_API_KEY=xxxx
-# 可选：OPENAI_BASE_URL / OPENAI_MODEL
-
-# Web 应用（Streamlit）
-python run_app.py                       # 自动检查依赖并启动
-streamlit run patent_writer_app.py      # 直接启动，访问 http://localhost:8501
-python run_app.py --check-only          # 仅检查依赖与后端可用性
-
-# 命令行流水线（无 CLI）
-python pipeline_runner.py \
-  --session-id 11111111-2222-3333-4444-555555555555 \
-  --input-path data/输入.docx \
-  --runtime-backend anthropic
-
-# Docker
-docker build -t patent-writer .
-docker run -p 8009:8009 patent-writer   # Streamlit 端口为 8009
+pip install -r requirements.txt    # 安装依赖
+python run_app.py --check-only     # 仅检查环境（CLI 可用性 + Native 后端 + 依赖）
+python run_app.py                  # 启动 Streamlit Web UI（默认 http://localhost:8501）
+streamlit run patent_writer_app.py # 直接启动（跳过环境检查）
 ```
 
-## 架构设计
+直接运行 Native 流水线（无 Web UI）：
+```bash
+python pipeline_runner.py \
+  --session-id <uuid> \
+  --input-path data/输入.docx \
+  --runtime-backend anthropic    # 或 openai
+```
 
-### 核心模式：Python Runner + 8 个专业子代理的流水线编排
+Docker 部署：
+```bash
+docker build -t patent-writer . && docker run -p 8009:8009 patent-writer
+```
 
-核心逻辑在以下文件：
-- `pipeline_runner.py`：8 阶段执行、重试、产物校验
-- `runtime_client.py`：模型后端适配（Anthropic/OpenAI）
-- `.claude/agents/*.md`：各阶段职责指令
+无测试套件、无 lint 配置、无 CI/CD。
 
-### 子代理流水线（严格顺序执行）
+## 架构：双运行时路由
+
+核心入口 `patent_writer_app.py`（Streamlit Web UI）根据 execution mode 分流：
+
+```
+patent_writer_app.py (Web UI)
+├── CLI runtime → subprocess.Popen → claude/codex/gemini CLI
+│   CLI 读取 .claude/agents/*.md 作为子代理定义
+│   MCP 工具（google-patents, exa）仅在此模式可用
+└── Native runtime → subprocess.Popen → pipeline_runner.py
+    pipeline_runner.py 读取 patent-writer/references/ 下的代理定义和写作指南
+    通过 runtime_client.py 统一调用 Anthropic/OpenAI SDK
+```
+
+**关键设计**：两种模式在 UI 层都通过子进程启动，保持一致的异步执行和日志流式输出。
+
+## 四大核心文件职责
+
+| 文件 | 职责 | 行数 |
+|------|------|------|
+| `patent_writer_app.py` | Streamlit Web UI：会话管理、进程管理、产物预览下载 | ~1600 |
+| `pipeline_runner.py` | Native 模式 8 阶段执行器，每阶段含 prompt 构建和输出验证 | ~800 |
+| `runtime_client.py` | LLM API 适配层，统一 `generate_text()` 接口 | ~360 |
+| `run_app.py` | 启动脚本，检查 pip 依赖 + CLI 可用性 + API Key | ~170 |
+
+## 8 阶段流水线
 
 ```
 input-parser → patent-searcher → outline-generator → abstract-writer
 → claims-writer → description-writer → diagram-generator → markdown-merger
 ```
 
-| 子代理 | 输入 | 输出 | 关键约束 |
-|--------|------|------|----------|
-| input-parser | raw_document.docx | 01_input/parsed_info.json | 使用 markitdown 转换 docx |
-| patent-searcher | parsed_info.json | 02_research/similar_patents.json, prior_art_analysis.md | 无 MCP 时可降级 |
-| outline-generator | parsed_info.json + similar_patents.json | 03_outline/patent_outline.md, structure_mapping.json | 必须读取 PATENT_SKILL.md |
-| abstract-writer | patent_outline.md | 04_content/abstract.md | ≤300 字 |
-| claims-writer | patent_outline.md + abstract.md | 04_content/claims.md | 方法+装置+设备+介质四类独权 |
-| description-writer | patent_outline.md + claims.md | 04_content/description.md | >10000 字，≤3 个实施例 |
-| diagram-generator | description.md + structure_mapping.json | 05_diagrams/**/*.mmd | Mermaid 格式 |
-| markdown-merger | 04_content/* + 05_diagrams/* | 06_final/complete_patent.md | 术语一致性校验 |
+阶段间通过文件系统通信（`output/temp_{session_id}/`），每阶段产出文件供下游读取。
 
-### 工作目录结构
+**特殊阶段**：
+- `description-writer`：分 6 次 LLM 调用分段生成（技术领域/背景技术/发明内容/附图说明/实施例×2），合并后若不足 10000 字自动扩写
+- `markdown-merger`：纯文件拼接，无 LLM 调用
+- **Fast 模式**：进入流水线前先用 LLM 将简要构思扩写为结构化技术交底书
 
-每次执行创建 `output/temp_[uuid]/`，包含 6 个阶段子目录（01_input → 06_final）加 metadata/。
+## 输出目录结构
 
-### MCP 工具依赖（可选）
+```
+output/temp_{session_id}/
+├── 01_input/parsed_info.json          # 必要
+├── 02_research/{similar_patents.json, prior_art_analysis.md, writing_style_guide.md}
+├── 03_outline/{patent_outline.md, structure_mapping.json}
+├── 04_content/{abstract.md, claims.md, description.md}  # 必要
+├── 05_diagrams/**/*.mmd
+└── 06_final/complete_patent.md        # 必要（最终产物）
+```
 
-- `@kunihiros/google-patents-mcp`：专利检索
-- `exa-mcp-server`：Web 搜索/技术文献
+失败日志：`output/temp_{session_id}/{agent_name}_error.log`
 
-## 专利写作编排指令
+## 代理定义文件
 
-1. 使用用户提供的 UUID 创建 `output/temp_[uuid]/` 工作目录
-2. 按流水线顺序依次执行并验证输出完整性
-3. 阶段失败写入 `output/temp_[uuid]/[agent_name]_error.log`，最多重试 3 次
-4. 最终交付：`output/temp_[uuid]/06_final/complete_patent.md`
+- `.claude/agents/*.md`：8 个子代理（CLI 模式下由 claude CLI 自动加载）
+- `patent-writer/references/agents/*.md`：相同内容的副本（Native 模式下由 pipeline_runner.py 读取为 system_prompt）
+- `PATENT_SKILL.md` + `patent-writer/references/patent-writing-guide.md`：大型写作指南，在 outline-generator 和 description-writer 阶段截断后注入 prompt
 
-### 质量标准
+## 环境变量与配置
 
-- 严格遵循中国《专利法》和《专利审查指南》规范
-- 具体实施方式 > 10000 字，实施例 ≤ 3 个
-- 全文术语一致，章节逻辑链条完整
-- JSON 使用 2 空格缩进，Mermaid 图表扩展名 `.mmd`
-- 图表引用与实际文件名匹配
+API Key 配置（至少配一组）：
+- `ANTHROPIC_API_KEY`（或 `ANTHROPIC_AUTH_TOKEN`）：Anthropic 后端
+- `OPENAI_API_KEY`：OpenAI 后端
 
-### 子代理目录映射
+运行时选择：
+- `PATENT_RUNTIME_MODE`：`native`（默认）或 `cli`
+- `PATENT_RUNTIME_BACKEND`：`anthropic`（默认）或 `openai`
+- `PATENT_CLI_BACKEND`：`claude`（默认）/ `codex` / `gemini`
 
-| 阶段 | 目录 | 文件 |
-|------|------|------|
-| 输入解析 | 01_input/ | raw_document.docx, parsed_info.json |
-| 专利研究 | 02_research/ | similar_patents.json, prior_art_analysis.md, writing_style_guide.md |
-| 大纲生成 | 03_outline/ | patent_outline.md, structure_mapping.json |
-| 内容撰写 | 04_content/ | abstract.md, claims.md, description.md, figures.md |
-| 图表生成 | 05_diagrams/ | flowcharts/*.mmd, structural_diagrams/*.mmd, sequence_diagrams/*.mmd |
-| 最终输出 | 06_final/ | complete_patent.md, summary_report.md |
+模型覆盖：
+- `ANTHROPIC_MODEL`（默认 `claude-3-5-sonnet-latest`）、`ANTHROPIC_BASE_URL`
+- `OPENAI_MODEL`（默认 `gpt-4o-mini`）、`OPENAI_BASE_URL`、`OPENAI_API_MODE`（`responses`/`chat`）
+
+**配置自动加载**：`runtime_client.py` 在模块加载时读取 `.claude/settings.local.json` 的 `env` 字段并注入 `os.environ`（同名系统环境变量优先）。
+
+## 修改代码时注意
+
+- **双运行时对称**：修改流水线逻辑时，需同时考虑 CLI 和 Native 两条路径
+- **代理定义双份**：`.claude/agents/*.md` 和 `patent-writer/references/agents/*.md` 内容需保持同步
+- **进程管理**：Web UI 通过 `psutil` + `os.killpg` 管理子进程树，`*.pid.json` 文件跨 Streamlit 重启保持会话恢复
+- **文件系统是唯一的阶段间通信方式**：不要引入数据库或消息队列
+- **所有注释和文档使用中文**

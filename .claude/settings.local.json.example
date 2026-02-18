@@ -1,12 +1,17 @@
 {
   "env": {
-    "ANTHROPIC_AUTH_TOKEN": "xxxxxxx",
-    "ANTHROPIC_BASE_URL": "https://open.bigmodel.cn/api/anthropic",
-    "API_TIMEOUT_MS": "3000000",
-    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "glm-4.6",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL": "glm-4.6",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL": "glm-4.6"
+    "PATENT_RUNTIME_MODE": "native",
+    "PATENT_RUNTIME_BACKEND": "anthropic",
+
+    "ANTHROPIC_AUTH_TOKEN": "your-anthropic-api-key",
+    "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+    "ANTHROPIC_MODEL": "claude-sonnet-4-20250514",
+
+    "OPENAI_API_KEY": "your-openai-api-key",
+    "OPENAI_BASE_URL": "https://api.openai.com/v1",
+    "OPENAI_MODEL": "gpt-4o-mini",
+
+    "API_TIMEOUT_MS": "3000000"
   },
   "permissions": {
     "allow": [

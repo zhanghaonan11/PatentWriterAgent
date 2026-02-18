@@ -6,10 +6,11 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import List
+from typing import Dict, List
 
 from runtime_client import RUNTIME_CONFIGS, get_available_runtime_backends, runtime_setup_hint
 
@@ -20,6 +21,12 @@ APP_FILE = ROOT_DIR / "patent_writer_app.py"
 PIPELINE_RUNNER = ROOT_DIR / "pipeline_runner.py"
 
 REQUIRED_MODULES = ["streamlit", "psutil", "markitdown"]
+
+CLI_CONFIGS: Dict[str, Dict[str, str]] = {
+    "claude": {"label": "Claude CLI", "binary": "claude"},
+    "codex": {"label": "OpenAI Codex CLI", "binary": "codex"},
+    "gemini": {"label": "Google Gemini CLI", "binary": "gemini"},
+}
 
 
 def log(message: str) -> None:
@@ -61,13 +68,9 @@ def ensure_dependencies(auto_install: bool) -> None:
     log(f"Missing modules: {', '.join(missing)}")
     if auto_install:
         install_requirements()
-        still_missing: List[str] = [
-            name for name in REQUIRED_MODULES if not module_exists(name)
-        ]
+        still_missing: List[str] = [name for name in REQUIRED_MODULES if not module_exists(name)]
         if still_missing:
-            raise SystemExit(
-                f"Modules still missing after installation: {', '.join(still_missing)}"
-            )
+            raise SystemExit(f"Modules still missing after installation: {', '.join(still_missing)}")
         log("Dependencies installed successfully.")
         return
 
@@ -78,21 +81,33 @@ def check_runtime_backends() -> None:
     available = get_available_runtime_backends()
 
     for backend, cfg in RUNTIME_CONFIGS.items():
-        hint = runtime_setup_hint(backend)
         if backend in available:
             log(f"{cfg.label} detected.")
         else:
-            log(f"Warning: {cfg.label} not ready. {hint}")
+            log(f"Warning: {cfg.label} not ready. {runtime_setup_hint(backend)}")
 
     if available:
         labels = [RUNTIME_CONFIGS[b].label for b in available]
-        log(f"Available generation runtimes: {', '.join(labels)}")
+        log(f"Available native runtimes: {', '.join(labels)}")
         return
 
-    log(
-        "Warning: No runtime backend is ready. Configure API credentials for "
-        "Anthropic-compatible or OpenAI-compatible backend."
-    )
+    log("Warning: No native runtime backend is ready.")
+
+
+def check_cli_backends() -> None:
+    detected = []
+    for cfg in CLI_CONFIGS.values():
+        cli_path = shutil.which(cfg["binary"])
+        if cli_path:
+            detected.append(cfg["label"])
+            log(f"{cfg['label']} detected: {cli_path}")
+        else:
+            log(f"Warning: {cfg['label']} not found in PATH.")
+
+    if detected:
+        log(f"Available CLI runtimes: {', '.join(detected)}")
+    else:
+        log("Warning: No CLI runtime detected.")
 
 
 def check_required_files() -> None:
@@ -102,8 +117,7 @@ def check_required_files() -> None:
             missing.append(path)
 
     if missing:
-        lines = "\n".join(str(path) for path in missing)
-        raise SystemExit(f"Missing required files:\n{lines}")
+        raise SystemExit("Missing required files:\n" + "\n".join(str(p) for p in missing))
 
 
 def launch_streamlit(host: str, port: int) -> int:
@@ -127,27 +141,10 @@ def launch_streamlit(host: str, port: int) -> int:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Start the PatentWriterAgent web app")
-    parser.add_argument(
-        "--host",
-        default=os.environ.get("STREAMLIT_SERVER_ADDRESS", "127.0.0.1"),
-        help="Streamlit bind address (default: 127.0.0.1)",
-    )
-    parser.add_argument(
-        "--port",
-        type=int,
-        default=int(os.environ.get("STREAMLIT_SERVER_PORT", "8501")),
-        help="Streamlit port (default: 8501)",
-    )
-    parser.add_argument(
-        "--skip-install",
-        action="store_true",
-        help="Skip automatic pip install when dependencies are missing",
-    )
-    parser.add_argument(
-        "--check-only",
-        action="store_true",
-        help="Only run checks, do not launch Streamlit",
-    )
+    parser.add_argument("--host", default=os.environ.get("STREAMLIT_SERVER_ADDRESS", "127.0.0.1"))
+    parser.add_argument("--port", type=int, default=int(os.environ.get("STREAMLIT_SERVER_PORT", "8501")))
+    parser.add_argument("--skip-install", action="store_true")
+    parser.add_argument("--check-only", action="store_true")
     return parser.parse_args()
 
 
@@ -158,14 +155,15 @@ def main() -> None:
     check_required_files()
     ensure_dependencies(auto_install=not args.skip_install)
     check_runtime_backends()
+    check_cli_backends()
 
     if args.check_only:
         log("Environment checks completed.")
         return
 
-    exit_code = launch_streamlit(args.host, args.port)
-    if exit_code != 0:
-        raise SystemExit(exit_code)
+    code = launch_streamlit(args.host, args.port)
+    if code != 0:
+        raise SystemExit(code)
 
 
 if __name__ == "__main__":
