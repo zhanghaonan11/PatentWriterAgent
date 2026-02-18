@@ -135,7 +135,7 @@ def infer_runtime_backend_from_command(command: List[str]) -> str:
         idx = command.index("--runtime-backend")
         if idx + 1 < len(command):
             raw_backend = (command[idx + 1] or "").strip().lower()
-            if raw_backend == "codex-cli":
+            if raw_backend in {"codex-cli", "gemini-cli"}:
                 return raw_backend
             try:
                 return normalize_runtime_backend(command[idx + 1])
@@ -179,38 +179,40 @@ def build_cli_command(
     description_parallelism: int = DESCRIPTION_PARALLELISM_MIN,
     fast_mode: bool = False,
 ) -> List[str]:
-    if cli_backend == "codex":
+    if cli_backend in {"codex", "gemini"}:
         # Fast-mode preprocessing expects raw model text output from the CLI.
         if fast_mode:
+            if cli_backend == "codex":
+                return [
+                    "codex",
+                    "exec",
+                    "--json",
+                    "--dangerously-bypass-approvals-and-sandbox",
+                    prompt,
+                ]
+
             return [
-                "codex",
-                "exec",
-                "--json",
-                "--dangerously-bypass-approvals-and-sandbox",
+                "gemini",
+                "-p",
                 prompt,
+                "-o",
+                "stream-json",
+                "-y",
             ]
 
         # Normal patent generation needs deterministic staged outputs. Reuse the
-        # existing 8-stage pipeline and route model calls through codex CLI.
+        # existing 8-stage pipeline and route model calls through CLI bridge runtime.
         if input_path is None:
-            raise ValueError("input_path is required for codex CLI patent generation")
+            raise ValueError(f"input_path is required for {cli_backend} CLI patent generation")
+
+        runtime_backend = "codex-cli" if cli_backend == "codex" else "gemini-cli"
         return build_runner_command(
-            runtime_backend="codex-cli",
+            runtime_backend=runtime_backend,
             session_id=session_id,
             input_path=input_path,
             prompt=prompt,
             description_parallelism=description_parallelism,
         )
-
-    if cli_backend == "gemini":
-        return [
-            "gemini",
-            "-p",
-            prompt,
-            "-o",
-            "stream-json",
-            "-y",
-        ]
 
     return [
         "claude",

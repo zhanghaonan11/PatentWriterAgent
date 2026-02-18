@@ -37,6 +37,11 @@ RUNTIME_CONFIGS: Dict[str, RuntimeConfig] = {
         env_keys=[],
         package="",
     ),
+    "gemini-cli": RuntimeConfig(
+        label="Gemini CLI bridge",
+        env_keys=[],
+        package="",
+    ),
 }
 
 
@@ -108,6 +113,8 @@ def _has_package(runtime_backend: str) -> bool:
     backend = normalize_runtime_backend(runtime_backend)
     if backend == "codex-cli":
         return shutil.which("codex") is not None
+    if backend == "gemini-cli":
+        return shutil.which("gemini") is not None
 
     package = RUNTIME_CONFIGS[backend].package
     if not package:
@@ -145,6 +152,8 @@ def runtime_setup_hint(runtime_backend: str) -> str:
     if not _has_package(backend):
         if backend == "codex-cli":
             hints.append("Codex CLI not found in PATH")
+        elif backend == "gemini-cli":
+            hints.append("Gemini CLI not found in PATH")
         else:
             hints.append(f"Missing Python package: {RUNTIME_CONFIGS[backend].package}")
 
@@ -476,6 +485,122 @@ def _generate_with_codex_cli(
                 pass
 
 
+def _extract_gemini_text_from_jsonl(raw_output: str) -> str:
+    chunks: List[str] = []
+    current_assistant_text = ""
+
+    for line in raw_output.splitlines():
+        text = line.strip()
+        if not text or not text.startswith("{"):
+            continue
+
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+
+        if not isinstance(payload, dict):
+            continue
+
+        event_type = payload.get("type")
+        if event_type == "message" and payload.get("role") == "assistant":
+            value = payload.get("content")
+            if isinstance(value, str) and value.strip():
+                current_assistant_text += value
+        elif event_type == "assistant":
+            message = payload.get("message") or {}
+            if isinstance(message, dict):
+                content = message.get("content")
+                if isinstance(content, str) and content.strip():
+                    current_assistant_text += content
+        elif event_type == "result":
+            value = payload.get("result")
+            if isinstance(value, str) and value.strip():
+                chunks.append(value.strip())
+
+    if current_assistant_text.strip():
+        chunks.append(current_assistant_text.strip())
+
+    if chunks:
+        return chunks[-1].strip()
+    return ""
+
+
+def _sanitize_gemini_stream_output(raw_output: str) -> str:
+    # Gemini CLI sometimes prints extension/MCP bootstrap logs before JSON lines.
+    # Keep only stream-json payload lines to avoid parser noise.
+    kept: List[str] = []
+    for line in raw_output.splitlines():
+        if line.strip().startswith("{"):
+            kept.append(line)
+    return "\n".join(kept)
+
+
+def _generate_with_gemini_cli(
+    prompt: str,
+    system_prompt: Optional[str],
+    timeout_seconds: int,
+) -> str:
+    if shutil.which("gemini") is None:
+        raise RuntimeClientError("Gemini CLI not found in PATH")
+
+    final_prompt = prompt.strip()
+    if system_prompt:
+        final_prompt = f"系统指令：\n{system_prompt.strip()}\n\n用户任务：\n{prompt.strip()}"
+
+    command = [
+        "gemini",
+        "-p",
+        final_prompt,
+        "-o",
+        "stream-json",
+        "-e",
+        "context7",
+        "--allowed-tools",
+        "read_file,run_shell_command,write_file,list_directory",
+    ]
+
+    model = (os.environ.get("GEMINI_MODEL") or "").strip()
+    if model:
+        command.extend(["-m", model])
+
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=str(Path(__file__).resolve().parent),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout_seconds,
+            check=False,
+        )
+        output = completed.stdout or ""
+
+        if completed.returncode != 0:
+            tail = "\n".join(output.splitlines()[-40:]).strip()
+            detail = f"\n{tail}" if tail else ""
+            raise RuntimeClientError(f"gemini CLI exited with code {completed.returncode}.{detail}")
+
+        sanitized = _sanitize_gemini_stream_output(output)
+        message = _extract_gemini_text_from_jsonl(sanitized)
+        if message:
+            return message
+
+        raise RuntimeClientError("gemini CLI response did not include text content")
+    except subprocess.TimeoutExpired as exc:
+        tail = ""
+        if exc.stdout:
+            if isinstance(exc.stdout, bytes):
+                decoded = exc.stdout.decode("utf-8", errors="replace")
+            else:
+                decoded = str(exc.stdout)
+            tail = "\n".join(decoded.splitlines()[-20:]).strip()
+        detail = f"\n{tail}" if tail else ""
+        raise RuntimeClientError(f"gemini CLI timed out after {timeout_seconds} seconds.{detail}") from exc
+
+
 def generate_text(
     runtime_backend: str,
     prompt: str,
@@ -504,6 +629,12 @@ def generate_text(
         )
     if backend == "codex-cli":
         return _generate_with_codex_cli(
+            prompt=prompt,
+            system_prompt=system_prompt,
+            timeout_seconds=timeout_seconds,
+        )
+    if backend == "gemini-cli":
+        return _generate_with_gemini_cli(
             prompt=prompt,
             system_prompt=system_prompt,
             timeout_seconds=timeout_seconds,

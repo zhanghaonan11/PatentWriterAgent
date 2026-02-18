@@ -252,6 +252,25 @@ def stage_input_parser(ctx: Dict[str, Any]) -> None:
 
     out = llm(runtime_backend, prompt, max_tokens=2200, temperature=0.1)
     parsed = extract_json(out)
+
+    if not isinstance(parsed, dict):
+        repair_prompt = f"""请将下面内容修复为严格 JSON 对象，仅输出 JSON，不要解释：
+{{
+  "title": "",
+  "technical_problem": "",
+  "existing_solutions": [""],
+  "existing_drawbacks": [""],
+  "technical_solution": "",
+  "benefits": [""],
+  "keywords": [""]
+}}
+
+内容如下：
+{trim_text(out, 20000)}
+"""
+        repaired = llm(runtime_backend, repair_prompt, max_tokens=2400, temperature=0.0)
+        parsed = extract_json(repaired)
+
     if not isinstance(parsed, dict):
         raise RuntimeError("input-parser returned invalid JSON")
     write_json(stage_dir / "parsed_info.json", normalize_parsed_info(parsed))
@@ -826,7 +845,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--runtime-backend",
         default=DEFAULT_RUNTIME_BACKEND,
-        choices=["anthropic", "openai", "codex-cli"],
+        choices=["anthropic", "openai", "codex-cli", "gemini-cli"],
     )
     parser.add_argument("--task-prompt", default="")
     parser.add_argument("--max-stage-retries", type=int, default=3)
