@@ -5,13 +5,12 @@ from __future__ import annotations
 import io
 import shlex
 import zipfile
-from collections import deque
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from app.config import OUTPUT_DIR
-from app.utils import is_valid_uuid, read_json_file, human_file_size
+from app.utils import is_valid_uuid, tail_text_lines
 
 
 def get_log_path(session_id: str) -> Path:
@@ -104,12 +103,7 @@ def append_log_footer(session_id: str, note: str) -> None:
 def tail_log_lines(path: Path, max_lines: int) -> List[str]:
     if not path.exists():
         return []
-
-    try:
-        with path.open("r", encoding="utf-8", errors="replace") as handle:
-            return list(deque(handle, maxlen=max_lines))
-    except OSError:
-        return []
+    return tail_text_lines(path, max_lines)
 
 
 def save_uploaded_file(uploaded_file: Any, session_id: str) -> Path:

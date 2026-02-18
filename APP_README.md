@@ -20,6 +20,7 @@ python run_app.py
 - `Execution mode`：切换 `CLI runtime` / `Native runtime`
 - `CLI backend`：`claude` / `codex` / `gemini`
 - `Native backend`：`anthropic` / `openai`
+- `Description parallelism`：Native 模式下说明书章节并发生成数（1-6）
 - `Input mode`：`normal` / `fast`
 
 ## 依赖要求

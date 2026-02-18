@@ -52,7 +52,8 @@ export ANTHROPIC_API_KEY="your-key"
 python pipeline_runner.py \
   --session-id 11111111-2222-3333-4444-555555555555 \
   --input-path data/输入.docx \
-  --runtime-backend anthropic
+  --runtime-backend anthropic \
+  --description-parallelism 2
 ```
 
 ## 配置说明
@@ -61,6 +62,7 @@ Native runtime 可选环境变量：
 - `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL`
 - `ANTHROPIC_MODEL` / `OPENAI_MODEL`
 - `PATENT_RUNTIME_BACKEND`（默认 native 后端）
+- `PATENT_DESCRIPTION_PARALLELISM`（说明书章节并发生成数，默认 2，范围 1-6）
 
 兼容配置：如果存在 `.claude/settings.local.json`，其中 `env` 字段会自动加载（同名环境变量优先）。
 

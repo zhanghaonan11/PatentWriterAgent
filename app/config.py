@@ -14,6 +14,18 @@ PIPELINE_RUNNER = ROOT_DIR / "pipeline_runner.py"
 
 PREVIEW_CHAR_LIMIT = 20000
 
+
+def _positive_int_from_env(name: str, default: int) -> int:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
 # --- Input modes ---
 MODE_NORMAL = "normal"
 MODE_FAST = "fast"
@@ -27,6 +39,15 @@ DEFAULT_EXECUTION_MODE = (
 )
 if DEFAULT_EXECUTION_MODE not in (EXEC_MODE_NATIVE, EXEC_MODE_CLI):
     DEFAULT_EXECUTION_MODE = EXEC_MODE_NATIVE
+
+# --- Native pipeline tuning ---
+DESCRIPTION_PARALLELISM_MIN = 1
+DESCRIPTION_PARALLELISM_MAX = 6
+DEFAULT_DESCRIPTION_PARALLELISM = _positive_int_from_env("PATENT_DESCRIPTION_PARALLELISM", 2)
+if DEFAULT_DESCRIPTION_PARALLELISM < DESCRIPTION_PARALLELISM_MIN:
+    DEFAULT_DESCRIPTION_PARALLELISM = DESCRIPTION_PARALLELISM_MIN
+if DEFAULT_DESCRIPTION_PARALLELISM > DESCRIPTION_PARALLELISM_MAX:
+    DEFAULT_DESCRIPTION_PARALLELISM = DESCRIPTION_PARALLELISM_MAX
 
 # --- CLI backend configs ---
 CLI_CONFIGS: Dict[str, Dict[str, str]] = {
