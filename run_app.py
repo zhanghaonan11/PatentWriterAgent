@@ -1,0 +1,172 @@
+#!/usr/bin/env python3
+"""Bootstrap script for PatentWriterAgent Streamlit frontend."""
+
+from __future__ import annotations
+
+import argparse
+import importlib.util
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import List
+
+from runtime_client import RUNTIME_CONFIGS, get_available_runtime_backends, runtime_setup_hint
+
+
+ROOT_DIR = Path(__file__).resolve().parent
+REQUIREMENTS_FILE = ROOT_DIR / "requirements.txt"
+APP_FILE = ROOT_DIR / "patent_writer_app.py"
+PIPELINE_RUNNER = ROOT_DIR / "pipeline_runner.py"
+
+REQUIRED_MODULES = ["streamlit", "psutil", "markitdown"]
+
+
+def log(message: str) -> None:
+    print(f"[run_app] {message}")
+
+
+def ensure_python_version() -> None:
+    if sys.version_info < (3, 8):
+        raise SystemExit("Python 3.8+ is required.")
+
+
+def ensure_directories() -> None:
+    (ROOT_DIR / "data").mkdir(parents=True, exist_ok=True)
+    (ROOT_DIR / "data" / "uploads").mkdir(parents=True, exist_ok=True)
+    (ROOT_DIR / "output").mkdir(parents=True, exist_ok=True)
+
+
+def module_exists(module_name: str) -> bool:
+    return importlib.util.find_spec(module_name) is not None
+
+
+def install_requirements() -> None:
+    if not REQUIREMENTS_FILE.exists():
+        raise SystemExit(f"Missing requirements file: {REQUIREMENTS_FILE}")
+
+    cmd = [sys.executable, "-m", "pip", "install", "-r", str(REQUIREMENTS_FILE)]
+    log("Installing Python dependencies from requirements.txt ...")
+    result = subprocess.run(cmd, cwd=str(ROOT_DIR), check=False)
+    if result.returncode != 0:
+        raise SystemExit("Dependency installation failed.")
+
+
+def ensure_dependencies(auto_install: bool) -> None:
+    missing: List[str] = [name for name in REQUIRED_MODULES if not module_exists(name)]
+    if not missing:
+        log("Python dependencies ready.")
+        return
+
+    log(f"Missing modules: {', '.join(missing)}")
+    if auto_install:
+        install_requirements()
+        still_missing: List[str] = [
+            name for name in REQUIRED_MODULES if not module_exists(name)
+        ]
+        if still_missing:
+            raise SystemExit(
+                f"Modules still missing after installation: {', '.join(still_missing)}"
+            )
+        log("Dependencies installed successfully.")
+        return
+
+    raise SystemExit("Install dependencies first: pip install -r requirements.txt")
+
+
+def check_runtime_backends() -> None:
+    available = get_available_runtime_backends()
+
+    for backend, cfg in RUNTIME_CONFIGS.items():
+        hint = runtime_setup_hint(backend)
+        if backend in available:
+            log(f"{cfg.label} detected.")
+        else:
+            log(f"Warning: {cfg.label} not ready. {hint}")
+
+    if available:
+        labels = [RUNTIME_CONFIGS[b].label for b in available]
+        log(f"Available generation runtimes: {', '.join(labels)}")
+        return
+
+    log(
+        "Warning: No runtime backend is ready. Configure API credentials for "
+        "Anthropic-compatible or OpenAI-compatible backend."
+    )
+
+
+def check_required_files() -> None:
+    missing: List[Path] = []
+    for path in (APP_FILE, PIPELINE_RUNNER):
+        if not path.exists():
+            missing.append(path)
+
+    if missing:
+        lines = "\n".join(str(path) for path in missing)
+        raise SystemExit(f"Missing required files:\n{lines}")
+
+
+def launch_streamlit(host: str, port: int) -> int:
+    cmd = [
+        sys.executable,
+        "-m",
+        "streamlit",
+        "run",
+        str(APP_FILE),
+        "--server.address",
+        host,
+        "--server.port",
+        str(port),
+    ]
+    env = os.environ.copy()
+    env.setdefault("STREAMLIT_BROWSER_GATHER_USAGE_STATS", "false")
+
+    log(f"Starting Streamlit on http://{host}:{port}")
+    return subprocess.call(cmd, cwd=str(ROOT_DIR), env=env)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Start the PatentWriterAgent web app")
+    parser.add_argument(
+        "--host",
+        default=os.environ.get("STREAMLIT_SERVER_ADDRESS", "127.0.0.1"),
+        help="Streamlit bind address (default: 127.0.0.1)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=int(os.environ.get("STREAMLIT_SERVER_PORT", "8501")),
+        help="Streamlit port (default: 8501)",
+    )
+    parser.add_argument(
+        "--skip-install",
+        action="store_true",
+        help="Skip automatic pip install when dependencies are missing",
+    )
+    parser.add_argument(
+        "--check-only",
+        action="store_true",
+        help="Only run checks, do not launch Streamlit",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    ensure_python_version()
+    ensure_directories()
+    check_required_files()
+    ensure_dependencies(auto_install=not args.skip_install)
+    check_runtime_backends()
+
+    if args.check_only:
+        log("Environment checks completed.")
+        return
+
+    exit_code = launch_streamlit(args.host, args.port)
+    if exit_code != 0:
+        raise SystemExit(exit_code)
+
+
+if __name__ == "__main__":
+    main()

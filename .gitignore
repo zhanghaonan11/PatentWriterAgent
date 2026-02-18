@@ -4,3 +4,4 @@ output/
 .claude/settings.local.json
 .mcp.json
 ~*
+data/uploads/
