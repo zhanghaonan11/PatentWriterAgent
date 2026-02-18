@@ -8,7 +8,7 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 
 @dataclass(frozen=True)
@@ -200,26 +200,136 @@ def _generate_with_openai(
 
     client = OpenAI(**kwargs)
     model = os.environ.get("OPENAI_MODEL") or "gpt-4o-mini"
+    api_mode = (os.environ.get("OPENAI_API_MODE", "responses").strip().lower() or "responses")
 
-    messages = []
+    if api_mode in {"chat", "chat.completions", "chat_completions"}:
+        messages: List[Dict[str, str]] = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+
+        response = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+
+        if not response.choices:
+            raise RuntimeClientError("OpenAI chat.completions response did not include choices")
+
+        text = str(response.choices[0].message.content or "").strip()
+        if text:
+            return text
+        raise RuntimeClientError("OpenAI chat.completions response did not include text content")
+
+    # Prefer minimal parameters for compatibility with OpenAI-compatible gateways.
+    # Some local proxies only support model+input for responses API.
+    request_kwargs: Dict[str, Any] = {
+        "model": model,
+        "input": prompt,
+    }
     if system_prompt:
-        messages.append({"role": "system", "content": system_prompt})
-    messages.append({"role": "user", "content": prompt})
+        request_kwargs["instructions"] = system_prompt
 
-    response = client.chat.completions.create(
-        model=model,
-        messages=messages,
-        temperature=temperature,
-        max_tokens=max_tokens,
+    advanced_params_enabled = (
+        os.environ.get("OPENAI_RESPONSES_ADVANCED_PARAMS", "false").strip().lower()
+        in {"1", "true", "yes", "on"}
     )
+    if advanced_params_enabled:
+        request_kwargs["temperature"] = temperature
+        request_kwargs["max_output_tokens"] = max_tokens
 
-    if not response.choices:
-        raise RuntimeClientError("OpenAI response did not include choices")
+    def _extract_response_text(response_obj: Any) -> str:
+        output_text = getattr(response_obj, "output_text", None)
+        if isinstance(output_text, str) and output_text.strip():
+            return output_text.strip()
 
-    text = str(response.choices[0].message.content or "").strip()
+        payload: Optional[Dict[str, Any]] = None
+        if hasattr(response_obj, "model_dump"):
+            dumped = response_obj.model_dump()
+            if isinstance(dumped, dict):
+                payload = dumped
+
+        if payload:
+            parts: List[str] = []
+            output_items = payload.get("output")
+            if isinstance(output_items, list):
+                for item in output_items:
+                    if not isinstance(item, dict):
+                        continue
+                    content_items = item.get("content")
+                    if not isinstance(content_items, list):
+                        continue
+                    for content in content_items:
+                        if not isinstance(content, dict):
+                            continue
+                        text_value = content.get("text")
+                        if isinstance(text_value, str) and text_value.strip():
+                            parts.append(text_value.strip())
+                        elif isinstance(text_value, dict):
+                            value = text_value.get("value") or text_value.get("text")
+                            if isinstance(value, str) and value.strip():
+                                parts.append(value.strip())
+
+            merged = "\n".join(part for part in parts if part).strip()
+            if merged:
+                return merged
+
+        return ""
+
+    def _normalize_input_as_list(user_prompt: str) -> List[Dict[str, Any]]:
+        return [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": user_prompt,
+                    }
+                ],
+            }
+        ]
+
+    def _extract_stream_text(stream_obj: Any) -> str:
+        chunks: List[str] = []
+        for event in stream_obj:
+            event_type = getattr(event, "type", "")
+            if event_type == "response.output_text.delta":
+                delta = getattr(event, "delta", "")
+                if isinstance(delta, str) and delta:
+                    chunks.append(delta)
+        return "".join(chunks).strip()
+
+    try:
+        response = client.responses.create(**request_kwargs)
+    except Exception as exc:  # pragma: no cover
+        message = str(exc)
+        needs_stream = "stream must be set to true" in message.lower()
+        needs_list_input = "input must be a list" in message.lower()
+        maybe_gateway_model_not_found = "model not found" in message.lower()
+        if not (needs_stream or needs_list_input or maybe_gateway_model_not_found):
+            raise
+
+        fallback_kwargs: Dict[str, Any] = {
+            "model": model,
+            "stream": True,
+            "input": _normalize_input_as_list(prompt),
+        }
+        if system_prompt:
+            fallback_kwargs["instructions"] = system_prompt
+
+        stream_response = client.responses.create(**fallback_kwargs)
+        text = _extract_stream_text(stream_response)
+        if text:
+            return text
+        raise RuntimeClientError("OpenAI responses fallback stream did not include text content")
+
+    text = _extract_response_text(response)
     if text:
         return text
-    raise RuntimeClientError("OpenAI response did not include text content")
+
+    raise RuntimeClientError("OpenAI responses API did not include text content")
 
 
 def generate_text(

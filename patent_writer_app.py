@@ -523,6 +523,26 @@ def build_prompt(custom_prompt: str, input_path: Path) -> str:
     return f"根据 {to_display_path(input_path)} 编写专利提案"
 
 
+def build_fast_mode_prompt(invention_idea: str) -> str:
+    idea = normalize_newlines(invention_idea).strip()
+    required_sections = "\n".join(f"- {title}" for title in FAST_SECTION_TITLES)
+    return (
+        "你是一名资深中国专利代理人。请把给定的发明构思扩写为可用于专利写作的技术交底草稿。\n\n"
+        "输出要求：\n"
+        "1. 仅输出中文 Markdown 正文，不要输出解释、前言或额外说明。\n"
+        "2. 必须包含以下章节，并保持该顺序：\n"
+        f"{required_sections}\n"
+        "3. 每个章节都要给出具体技术内容，避免空泛表述。参数不明确时可合理假设，并显式标注“假设：...”。\n"
+        "4. 适度补充实施细节（结构、流程、关键参数范围、可选方案），使内容可直接用于后续专利生成。\n"
+        "5. 输出必须严格包裹在以下标记之间：\n"
+        "<FAST_DISCLOSURE_START>\n"
+        "...这里是正文...\n"
+        "<FAST_DISCLOSURE_END>\n\n"
+        "发明构思如下：\n"
+        f"{idea}\n"
+    )
+
+
 def build_runner_command(
     runtime_backend: str,
     session_id: str,
@@ -1093,7 +1113,7 @@ def render_file_preview(title: str, path: Path, language: str) -> None:
             data=path.read_bytes(),
             file_name=path.name,
             mime="text/plain",
-            use_container_width=True,
+            width="stretch",
         )
         st.code(preview, language=language)
         if truncated:
@@ -1168,6 +1188,31 @@ def initialize_state() -> None:
             st.session_state[key] = value
 
 
+def normalize_state_values() -> None:
+    st.session_state.selected_execution_mode = normalize_execution_mode(
+        str(st.session_state.get("selected_execution_mode", DEFAULT_EXECUTION_MODE))
+    )
+
+    selected_runtime_backend = str(
+        st.session_state.get("selected_runtime_backend", DEFAULT_RUNTIME_BACKEND)
+    )
+    if selected_runtime_backend not in RUNTIME_CONFIGS:
+        selected_runtime_backend = DEFAULT_RUNTIME_BACKEND
+        if selected_runtime_backend not in RUNTIME_CONFIGS:
+            selected_runtime_backend = list(RUNTIME_CONFIGS.keys())[0]
+    st.session_state.selected_runtime_backend = selected_runtime_backend
+
+    selected_cli_backend = str(st.session_state.get("selected_cli_backend", DEFAULT_CLI_BACKEND))
+    if selected_cli_backend not in CLI_CONFIGS:
+        selected_cli_backend = DEFAULT_CLI_BACKEND
+    st.session_state.selected_cli_backend = selected_cli_backend
+
+    input_mode = str(st.session_state.get("input_mode", MODE_NORMAL))
+    if input_mode not in (MODE_NORMAL, MODE_FAST):
+        input_mode = MODE_NORMAL
+    st.session_state.input_mode = input_mode
+
+
 def get_backend_display_for_metadata(metadata: Dict[str, Any]) -> str:
     mode = normalize_execution_mode(str(metadata.get("execution_mode", DEFAULT_EXECUTION_MODE)))
     if mode == EXEC_MODE_CLI:
@@ -1188,7 +1233,7 @@ def build_history_rows(session_ids: List[str]) -> List[Dict[str, Any]]:
                 "status": "running" if metadata else "idle",
                 "mode": get_execution_mode_label(str(metadata.get("execution_mode", DEFAULT_EXECUTION_MODE))) if metadata else "-",
                 "backend": get_backend_display_for_metadata(metadata) if metadata else "-",
-                "pid": metadata.get("pid", "-") if metadata else "-",
+                "pid": str(metadata.get("pid", "-")) if metadata else "-",
                 "log_size": human_file_size(log_path.stat().st_size) if log_path.exists() else "0 B",
                 "updated": format_timestamp(log_path.stat().st_mtime if log_path.exists() else None),
             }
@@ -1202,6 +1247,7 @@ def main() -> None:
     ensure_directories()
     cleanup_stale_pid_files()
     initialize_state()
+    normalize_state_values()
 
     st.markdown(
         """
@@ -1218,7 +1264,7 @@ def main() -> None:
 
     with st.sidebar:
         st.markdown("### Session")
-        if st.button("Generate new session ID", use_container_width=True):
+        if st.button("Generate new session ID", width="stretch"):
             st.session_state.session_id = str(uuid.uuid4())
 
         st.text_input("Session ID (UUID)", key="session_id")
@@ -1228,7 +1274,7 @@ def main() -> None:
             key="history_selection",
             format_func=lambda value: "Select a previous session" if value == "" else value,
         )
-        if st.button("Load selected session", use_container_width=True):
+        if st.button("Load selected session", width="stretch"):
             selected = st.session_state.history_selection
             if selected:
                 st.session_state.session_id = selected
@@ -1264,7 +1310,7 @@ def main() -> None:
 
         if st.session_state.input_mode == MODE_NORMAL:
             upload = st.file_uploader("Upload disclosure (.docx)", type=["docx"])
-            if st.button("Save uploaded file", use_container_width=True):
+            if st.button("Save uploaded file", width="stretch"):
                 current_session = st.session_state.session_id.strip()
                 if not is_valid_uuid(current_session):
                     st.warning("Set a valid UUID session ID before saving the file.")
@@ -1313,24 +1359,9 @@ def main() -> None:
     session_id = st.session_state.session_id.strip()
 
     selected_execution_mode = normalize_execution_mode(str(st.session_state.selected_execution_mode))
-    st.session_state.selected_execution_mode = selected_execution_mode
-
     selected_runtime_backend = str(st.session_state.selected_runtime_backend)
-    if selected_runtime_backend not in RUNTIME_CONFIGS:
-        selected_runtime_backend = DEFAULT_RUNTIME_BACKEND
-        if selected_runtime_backend not in RUNTIME_CONFIGS:
-            selected_runtime_backend = list(RUNTIME_CONFIGS.keys())[0]
-        st.session_state.selected_runtime_backend = selected_runtime_backend
-
     selected_cli_backend = str(st.session_state.selected_cli_backend)
-    if selected_cli_backend not in CLI_CONFIGS:
-        selected_cli_backend = DEFAULT_CLI_BACKEND
-        st.session_state.selected_cli_backend = selected_cli_backend
-
     input_mode = str(st.session_state.input_mode)
-    if input_mode not in (MODE_NORMAL, MODE_FAST):
-        input_mode = MODE_NORMAL
-        st.session_state.input_mode = input_mode
 
     fast_idea = str(st.session_state.fast_invention_idea or "").strip()
 
@@ -1412,12 +1443,12 @@ def main() -> None:
     start_clicked = start_col.button(
         "Start generation",
         type="primary",
-        use_container_width=True,
+        width="stretch",
         disabled=start_disabled,
     )
     stop_clicked = stop_col.button(
         "Stop session",
-        use_container_width=True,
+        width="stretch",
         disabled=running_metadata is None,
     )
 
@@ -1430,9 +1461,9 @@ def main() -> None:
 
     cleanup_clicked = cleanup_col.button(
         f"Force cleanup {cleanup_label}",
-        use_container_width=True,
+        width="stretch",
     )
-    refresh_clicked = refresh_col.button("Refresh", use_container_width=True)
+    refresh_clicked = refresh_col.button("Refresh", width="stretch")
 
     if start_clicked:
         effective_input_path = input_path
@@ -1525,7 +1556,7 @@ def main() -> None:
                     data=current_log_path.read_bytes(),
                     file_name=current_log_path.name,
                     mime="text/plain",
-                    use_container_width=True,
+                    width="stretch",
                 )
 
     with output_tab:
@@ -1541,7 +1572,7 @@ def main() -> None:
                     data=archive_data,
                     file_name=f"patent_session_{session_id}.zip",
                     mime="application/zip",
-                    use_container_width=True,
+                    width="stretch",
                 )
             render_file_preview(
                 "01_input/parsed_info.json",
@@ -1574,7 +1605,7 @@ def main() -> None:
         if not session_rows:
             st.info("No history sessions found.")
         else:
-            st.dataframe(session_rows, use_container_width=True, hide_index=True)
+            st.dataframe(session_rows, width="stretch", hide_index=True)
             st.caption("Load a session from the sidebar to inspect or continue it.")
 
     if st.session_state.auto_refresh and running_metadata is not None:
