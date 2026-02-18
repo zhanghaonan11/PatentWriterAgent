@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import re
 import shutil
 import traceback
@@ -30,10 +31,11 @@ AGENTS_DIR = ROOT_DIR / ".claude" / "agents"
 PATENT_SKILL_PATH = ROOT_DIR / "PATENT_SKILL.md"
 PATENT_GUIDE_PATH = ROOT_DIR / "patent-writer" / "references" / "patent-writing-guide.md"
 
+logger = logging.getLogger("pipeline_runner")
+
 
 def log(message: str) -> None:
-    ts = datetime.now().isoformat(timespec="seconds")
-    print(f"[{ts}] {message}", flush=True)
+    logger.info(message)
 
 
 def read_text(path: Path, default: str = "") -> str:
@@ -748,6 +750,11 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="[%(asctime)s] %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+    )
     args = parse_args()
 
     backend = args.runtime_backend

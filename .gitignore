@@ -1,7 +1,32 @@
+gemini_output.txt
+test_fast_mode_gemini.py
+temp_*.py
 __pycache__/
+*.pyc
+*.pyo
 output/
 .DS_Store
 .claude/settings.local.json
 .mcp.json
 ~*
 data/uploads/
+
+# Environment
+.env
+.env.*
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Python packaging
+*.egg-info/
+dist/
+build/

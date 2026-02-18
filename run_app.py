@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Dict, List
 
 from runtime_client import RUNTIME_CONFIGS, get_available_runtime_backends, runtime_setup_hint
+from app.config import CLI_CONFIGS
 
 
 ROOT_DIR = Path(__file__).resolve().parent
@@ -21,12 +22,6 @@ APP_FILE = ROOT_DIR / "patent_writer_app.py"
 PIPELINE_RUNNER = ROOT_DIR / "pipeline_runner.py"
 
 REQUIRED_MODULES = ["streamlit", "psutil", "markitdown"]
-
-CLI_CONFIGS: Dict[str, Dict[str, str]] = {
-    "claude": {"label": "Claude CLI", "binary": "claude"},
-    "codex": {"label": "OpenAI Codex CLI", "binary": "codex"},
-    "gemini": {"label": "Google Gemini CLI", "binary": "gemini"},
-}
 
 
 def log(message: str) -> None:

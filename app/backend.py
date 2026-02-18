@@ -1,0 +1,180 @@
+"""Backend helpers: CLI/Native command building, availability checks, label helpers."""
+
+from __future__ import annotations
+
+import shutil
+import sys
+from pathlib import Path
+from typing import List
+
+from app.config import (
+    CLI_CONFIGS,
+    DEFAULT_CLI_BACKEND,
+    DEFAULT_EXECUTION_MODE,
+    EXEC_MODE_CLI,
+    EXEC_MODE_NATIVE,
+    PIPELINE_RUNNER,
+)
+from runtime_client import (
+    DEFAULT_RUNTIME_BACKEND,
+    RuntimeClientError,
+    get_runtime_label,
+    normalize_runtime_backend,
+)
+
+
+# --- Execution mode helpers ---
+
+def normalize_execution_mode(execution_mode: str) -> str:
+    mode = (execution_mode or "").strip().lower()
+    if mode in (EXEC_MODE_NATIVE, EXEC_MODE_CLI):
+        return mode
+    return DEFAULT_EXECUTION_MODE
+
+
+def get_execution_mode_label(execution_mode: str) -> str:
+    mode = normalize_execution_mode(execution_mode)
+    if mode == EXEC_MODE_CLI:
+        return "CLI runtime"
+    return "Native runtime"
+
+
+def get_mode_label(mode: str) -> str:
+    from app.config import MODE_FAST
+    if mode == MODE_FAST:
+        return "Fast mode (idea -> disclosure -> patent)"
+    return "Normal mode (.docx -> patent)"
+
+
+# --- CLI backend helpers ---
+
+def get_cli_binary(cli_backend: str) -> str:
+    cfg = CLI_CONFIGS.get(cli_backend, CLI_CONFIGS[DEFAULT_CLI_BACKEND])
+    return cfg["binary"]
+
+
+def get_cli_label(cli_backend: str) -> str:
+    cfg = CLI_CONFIGS.get(cli_backend, CLI_CONFIGS[DEFAULT_CLI_BACKEND])
+    return cfg["label"]
+
+
+def safe_cli_label(cli_backend: str) -> str:
+    if cli_backend in CLI_CONFIGS:
+        return get_cli_label(cli_backend)
+    return str(cli_backend)
+
+
+def get_cli_process_keyword(cli_backend: str) -> str:
+    cfg = CLI_CONFIGS.get(cli_backend, CLI_CONFIGS[DEFAULT_CLI_BACKEND])
+    return cfg["process_keyword"]
+
+
+def is_cli_available(cli_backend: str) -> bool:
+    return shutil.which(get_cli_binary(cli_backend)) is not None
+
+
+def get_available_cli_backends() -> List[str]:
+    return [backend for backend in CLI_CONFIGS if is_cli_available(backend)]
+
+
+# --- Runtime backend helpers ---
+
+def safe_runtime_label(runtime_backend: str) -> str:
+    try:
+        return get_runtime_label(runtime_backend)
+    except RuntimeClientError:
+        return str(runtime_backend)
+
+
+# --- Command inference ---
+
+def infer_cli_backend_from_command(command: List[str]) -> str:
+    if not command:
+        return DEFAULT_CLI_BACKEND
+
+    executable = Path(command[0]).name.lower()
+    for backend, cfg in CLI_CONFIGS.items():
+        if cfg["binary"] == executable:
+            return backend
+
+    joined = " ".join(command).lower()
+    for backend, cfg in CLI_CONFIGS.items():
+        if f" {cfg['binary']}" in f" {joined}":
+            return backend
+
+    return DEFAULT_CLI_BACKEND
+
+
+def infer_execution_mode_from_command(command: List[str]) -> str:
+    if not command:
+        return DEFAULT_EXECUTION_MODE
+    joined = " ".join(command)
+    if "pipeline_runner.py" in joined:
+        return EXEC_MODE_NATIVE
+    return EXEC_MODE_CLI
+
+
+def infer_runtime_backend_from_command(command: List[str]) -> str:
+    if "--runtime-backend" in command:
+        idx = command.index("--runtime-backend")
+        if idx + 1 < len(command):
+            try:
+                return normalize_runtime_backend(command[idx + 1])
+            except RuntimeClientError:
+                pass
+    return DEFAULT_RUNTIME_BACKEND
+
+
+# --- Command building ---
+
+def build_runner_command(
+    runtime_backend: str,
+    session_id: str,
+    input_path: Path,
+    prompt: str,
+) -> List[str]:
+    return [
+        sys.executable,
+        str(PIPELINE_RUNNER),
+        "--session-id",
+        session_id,
+        "--input-path",
+        str(input_path),
+        "--runtime-backend",
+        runtime_backend,
+        "--task-prompt",
+        prompt,
+    ]
+
+
+def build_cli_command(cli_backend: str, session_id: str, prompt: str) -> List[str]:
+    if cli_backend == "codex":
+        return [
+            "codex",
+            "exec",
+            "--json",
+            "--dangerously-bypass-approvals-and-sandbox",
+            prompt,
+        ]
+
+    if cli_backend == "gemini":
+        return [
+            "gemini",
+            "-p",
+            prompt,
+            "-o",
+            "stream-json",
+            "-y",
+        ]
+
+    return [
+        "claude",
+        "--dangerously-skip-permissions",
+        "--session-id",
+        session_id,
+        prompt,
+        "-p",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+    ]
