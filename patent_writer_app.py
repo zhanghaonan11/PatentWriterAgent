@@ -159,12 +159,12 @@ def render_file_preview(title: str, path: Path, language: str) -> None:
     with st.expander(title, expanded=path.exists()):
         st.caption(to_display_path(path))
         if not path.exists():
-            st.info("Not generated yet.")
+            st.info("尚未生成。")
             return
 
         preview, truncated = read_text_preview(path)
         st.download_button(
-            label=f"Download {path.name}",
+            label=f"下载 {path.name}",
             data=path.read_bytes(),
             file_name=path.name,
             mime="text/plain",
@@ -172,7 +172,7 @@ def render_file_preview(title: str, path: Path, language: str) -> None:
         )
         st.code(preview, language=language)
         if truncated:
-            st.caption(f"Preview truncated to first {PREVIEW_CHAR_LIMIT} characters.")
+            st.caption(f"预览已截断至前 {PREVIEW_CHAR_LIMIT} 个字符。")
 
 
 def get_backend_display_for_metadata(metadata: Dict[str, Any]) -> str:
@@ -191,13 +191,13 @@ def build_history_rows(session_ids: List[str]) -> List[Dict[str, Any]]:
         metadata = get_running_metadata(session_id)
         rows.append(
             {
-                "session_id": session_id,
-                "status": "running" if metadata else "idle",
-                "mode": get_execution_mode_label(str(metadata.get("execution_mode", DEFAULT_EXECUTION_MODE))) if metadata else "-",
-                "backend": get_backend_display_for_metadata(metadata) if metadata else "-",
-                "pid": str(metadata.get("pid", "-")) if metadata else "-",
-                "log_size": human_file_size(log_path.stat().st_size) if log_path.exists() else "0 B",
-                "updated": format_timestamp(log_path.stat().st_mtime if log_path.exists() else None),
+                "会话 ID": session_id,
+                "状态": "运行中" if metadata else "空闲",
+                "运行模式": get_execution_mode_label(str(metadata.get("execution_mode", DEFAULT_EXECUTION_MODE))) if metadata else "-",
+                "后端引擎": get_backend_display_for_metadata(metadata) if metadata else "-",
+                "进程 PID": str(metadata.get("pid", "-")) if metadata else "-",
+                "日志大小": human_file_size(log_path.stat().st_size) if log_path.exists() else "0 B",
+                "最后更新": format_timestamp(log_path.stat().st_mtime if log_path.exists() else None),
             }
         )
     return rows
@@ -218,18 +218,18 @@ def start_generation(
     description_parallelism: int,
 ) -> tuple[bool, str]:
     if not is_valid_uuid(session_id):
-        return False, "Session ID must be a valid UUID."
+        return False, "Session ID 必须是有效的 UUID。"
     if get_running_metadata(session_id):
-        return False, "This session is already running."
+        return False, "该会话正在运行中。"
     if not input_path.exists():
-        return False, f"Input file not found: {input_path}"
+        return False, f"未找到输入文件: {input_path}"
 
     execution_mode = normalize_execution_mode(execution_mode)
     prompt = build_prompt(custom_prompt, input_path)
 
     if execution_mode == EXEC_MODE_CLI:
         if not is_cli_available(cli_backend):
-            return False, f"{get_cli_label(cli_backend)} not found in PATH."
+            return False, f"环境变量 PATH 中未找到 {get_cli_label(cli_backend)}。"
         command = build_cli_command(
             cli_backend,
             session_id,
@@ -243,7 +243,7 @@ def start_generation(
         if not is_runtime_available(runtime_backend):
             return (
                 False,
-                f"{safe_runtime_label(runtime_backend)} is not ready. {runtime_setup_hint(runtime_backend)}",
+                f"{safe_runtime_label(runtime_backend)} 未就绪。{runtime_setup_hint(runtime_backend)}",
             )
         command = build_runner_command(
             runtime_backend,
@@ -265,7 +265,7 @@ def start_generation(
                 preexec_fn=os.setsid if os.name != "nt" else None,
             )
     except OSError as exc:
-        return False, f"Failed to start process: {exc}"
+        return False, f"启动进程失败: {exc}"
 
     write_pid_metadata(
         session_id=session_id,
@@ -277,19 +277,19 @@ def start_generation(
         runtime_backend=runtime_backend,
         cli_backend=cli_backend,
     )
-    return True, f"Started session {session_id} with {backend_msg} (PID {process.pid})."
+    return True, f"已使用 {backend_msg} 启动会话 {session_id} (PID {process.pid})。"
 
 
 def stop_generation(session_id: str) -> tuple[bool, str]:
     metadata = get_running_metadata(session_id)
     if not metadata:
         remove_pid_metadata(session_id)
-        return False, "No running process found for this session."
+        return False, "找不到该会话的运行进程。"
 
     pid = int(metadata["pid"])
     success, message = terminate_pid_tree(pid)
     remove_pid_metadata(session_id)
-    append_log_footer(session_id, f"session stopped manually (pid={pid})")
+    append_log_footer(session_id, f"会话已被手动停止 (pid={pid})")
     return success, f"{message} pid={pid}"
 
 
@@ -406,7 +406,7 @@ def normalize_state_values() -> None:
 
 
 def main() -> None:
-    st.set_page_config(page_title="PatentWriterAgent Web UI", page_icon=":memo:", layout="wide")
+    st.set_page_config(page_title="专利撰写助手", page_icon=":memo:", layout="wide")
     inject_styles()
     ensure_directories()
     cleanup_stale_pid_files()
@@ -416,9 +416,9 @@ def main() -> None:
     st.markdown(
         """
 <div class="hero">
-  <small>Patent Writer Agent</small>
-  <h1>Web Control Panel</h1>
-  <p>Upload a disclosure document, choose execution mode (CLI/Native), and inspect logs plus generated artifacts in one place.</p>
+  <small>专利撰写助手</small>
+  <h1>Web 控制面板</h1>
+  <p>上传交底书文件，选择运行模式 (CLI/原生引擎)，可以在此界面中一站式查看运行日志和最后生成的文档。</p>
 </div>
 """,
         unsafe_allow_html=True,
@@ -427,27 +427,27 @@ def main() -> None:
     sessions = list_sessions()
 
     with st.sidebar:
-        st.markdown("### Session")
-        if st.button("Generate new session ID", width="stretch"):
+        st.markdown("### 会话管理")
+        if st.button("生成新的会话 ID", width="stretch"):
             st.session_state.session_id = str(uuid.uuid4())
 
-        st.text_input("Session ID (UUID)", key="session_id")
+        st.text_input("会话 ID (UUID)", key="session_id")
         st.selectbox(
-            "History sessions",
+            "历史会话",
             options=[""] + sessions,
             key="history_selection",
-            format_func=lambda value: "Select a previous session" if value == "" else value,
+            format_func=lambda value: "请选择历史会话" if value == "" else value,
         )
-        if st.button("Load selected session", width="stretch"):
+        if st.button("加载所选会话", width="stretch"):
             selected = st.session_state.history_selection
             if selected:
                 st.session_state.session_id = selected
                 safe_rerun()
 
         st.markdown("---")
-        st.markdown("### Runtime")
+        st.markdown("### 运行环境配置")
         st.radio(
-            "Execution mode",
+            "执行模式",
             options=[EXEC_MODE_NATIVE, EXEC_MODE_CLI],
             key="selected_execution_mode",
             format_func=get_execution_mode_label,
@@ -455,77 +455,76 @@ def main() -> None:
 
         if st.session_state.selected_execution_mode == EXEC_MODE_NATIVE:
             st.selectbox(
-                "Native backend",
+                "原生引擎 (Native backend)",
                 options=list(RUNTIME_CONFIGS.keys()),
                 key="selected_runtime_backend",
                 format_func=safe_runtime_label,
             )
             st.slider(
-                "Description parallelism",
+                "技术交底书拆分并发数",
                 min_value=DESCRIPTION_PARALLELISM_MIN,
                 max_value=DESCRIPTION_PARALLELISM_MAX,
                 key="description_parallelism",
-                help="Concurrent section generation in description stage (native runtime only).",
+                help="在生成说明书正文阶段将并发同时生成各模块 (仅在原生引擎下生效)。",
             )
         else:
             st.selectbox(
-                "CLI backend",
+                "命令行后端 (CLI backend)",
                 options=list(CLI_CONFIGS.keys()),
                 key="selected_cli_backend",
                 format_func=safe_cli_label,
             )
 
         st.markdown("---")
-        st.markdown("### Input")
-        st.radio("Input mode", options=[MODE_NORMAL, MODE_FAST], key="input_mode", format_func=get_mode_label)
+        st.markdown("### 输入参数")
+        st.radio("处理模式", options=[MODE_NORMAL, MODE_FAST], key="input_mode", format_func=get_mode_label)
 
         if st.session_state.input_mode == MODE_NORMAL:
-            upload = st.file_uploader("Upload disclosure (.docx)", type=["docx"])
-            if st.button("Save uploaded file", width="stretch"):
+            upload = st.file_uploader("上传交底书 (.docx)", type=["docx"])
+            if st.button("保存上传的文件", width="stretch"):
                 current_session = st.session_state.session_id.strip()
                 if not is_valid_uuid(current_session):
-                    st.warning("Set a valid UUID session ID before saving the file.")
+                    st.warning("保存文件前，请确保会话 ID 为有效的 UUID。")
                 elif upload is None:
-                    st.warning("Choose a DOCX file first.")
+                    st.warning("请先上传选择 DOCX 格式的文件。")
                 else:
                     saved_file = save_uploaded_file(upload, current_session)
                     st.session_state.input_path = to_display_path(saved_file)
-                    st.success(f"Saved: {to_display_path(saved_file)}")
+                    st.success(f"已保存: {to_display_path(saved_file)}")
 
-            st.text_input("Input file path", key="input_path")
+            st.text_input("输入文件路径", key="input_path")
         else:
             st.text_area(
-                "Invention idea (fast mode)",
+                "发明构思 (极速模式)",
                 key="fast_invention_idea",
                 height=150,
                 placeholder=(
-                    "Describe your invention idea briefly. Fast mode will expand it "
-                    "into a structured disclosure document automatically."
+                    "简要描述您的发明构思。极速模式会自动将其扩充为结构化的交底书文档。"
                 ),
             )
             st.caption(
-                "Fast mode first expands your idea into a disclosure .docx file, "
-                "then runs the standard patent generation pipeline."
+                "极速模式会先将您的构思扩充为交底书 .docx 文件，然后再作为输入运行标准专利生成流程。"
             )
 
         st.text_area(
-            "Prompt override (optional)",
+            "自定义提示词覆盖 (可选)",
             key="custom_prompt",
             height=140,
-            placeholder="Optional. You can use {input_path} placeholder.",
+            placeholder="留空则使用默认提示词。支持使用 {input_path} 占位符。",
         )
 
         st.markdown("---")
-        st.markdown("### Log options")
-        st.checkbox("Show raw JSON events", key="show_raw_json")
-        st.slider("Max log lines", min_value=100, max_value=3000, key="max_log_lines")
-        st.checkbox("Auto refresh while running", key="auto_refresh")
+        st.markdown("### 日志选项")
+        st.checkbox("显示原始 JSON 数据", key="show_raw_json")
+        st.slider("显示的日志行数上限", min_value=100, max_value=3000, key="max_log_lines")
+        st.checkbox("运行期间自动刷新", key="auto_refresh")
         st.slider(
-            "Refresh interval (seconds)",
+            "自动刷新间隔 (秒)",
             min_value=1,
             max_value=10,
             key="refresh_seconds",
         )
+
 
     session_id = st.session_state.session_id.strip()
 
@@ -565,46 +564,46 @@ def main() -> None:
         )
         running_backend_label = get_backend_display_for_metadata(running_metadata)
 
-    st.caption(f"Active session: `{session_id}`" if session_id else "Active session: `-`")
+    st.caption(f"当前活动会话: `{session_id}`" if session_id else "当前活动会话: `-`")
 
     status_col, pid_col, log_col, update_col = st.columns(4)
-    status_col.metric("Status", "Running" if running_metadata else "Idle")
-    pid_col.metric("PID", str(running_metadata.get("pid")) if running_metadata else "-")
+    status_col.metric("状态", "运行中" if running_metadata else "系统空闲")
+    pid_col.metric("进程 PID", str(running_metadata.get("pid")) if running_metadata else "-")
     log_size = human_file_size(log_path.stat().st_size) if log_path and log_path.exists() else "0 B"
-    log_col.metric("Log size", log_size)
+    log_col.metric("日志大小", log_size)
     update_time = format_timestamp(log_path.stat().st_mtime if log_path and log_path.exists() else None)
-    update_col.metric("Last log update", update_time)
+    update_col.metric("日志最后更新", update_time)
 
     st.caption(
-        f"Selected: `{selected_mode_label}` / `{selected_backend_label}` | "
-        f"Running: `{get_execution_mode_label(running_execution_mode)}` / `{running_backend_label}`"
-        f" | Description parallelism: `{description_parallelism}`"
+        f"当前已选配置: `{selected_mode_label}` / `{selected_backend_label}` | "
+        f"实际运行配置: `{get_execution_mode_label(running_execution_mode)}` / `{running_backend_label}`"
+        f" | 说明书正文并发数: `{description_parallelism}`"
     )
 
     if not is_valid_uuid(session_id):
-        st.warning("Session ID must be a valid UUID.")
+        st.warning("Session ID 必须是有效的 UUID。")
 
     if selected_execution_mode == EXEC_MODE_NATIVE:
         if not available_runtime_backends:
             st.error(
-                "No native runtime backend is ready. Configure API credentials for Anthropic-compatible or OpenAI-compatible backend."
+                "没有可用的原生引擎后端。请配置与 Anthropic 或 OpenAI 兼容 API 对应的凭证环境变量。"
             )
         elif not selected_runtime_ready:
             st.warning(
-                f"{selected_backend_label} is not ready. {runtime_setup_hint(selected_runtime_backend)}"
+                f"{selected_backend_label} 未就绪。{runtime_setup_hint(selected_runtime_backend)}"
             )
     else:
         if not available_cli_backends:
             st.error(
-                "No supported CLI found in PATH. Install Claude CLI, OpenAI Codex CLI, or Google Gemini CLI."
+                "在环境变量 PATH 中未找到支持的 CLI 工具。请安装 Claude CLI、OpenAI Codex CLI 或 Google Gemini CLI。"
             )
         elif not selected_cli_ready:
-            st.warning(f"{selected_backend_label} is not found in PATH.")
+            st.warning(f"在系统 PATH 中未找到 {selected_backend_label}。")
 
     if input_mode == MODE_NORMAL and not input_path.exists():
-        st.warning(f"Input file does not exist: {input_path}")
+        st.warning(f"输入文件不存在: {input_path}")
     if input_mode == MODE_FAST and not fast_idea:
-        st.warning("Fast mode requires a brief invention idea.")
+        st.warning("极速模式需要填写简要的发明构思。")
 
     start_col, stop_col, cleanup_col, refresh_col = st.columns(4)
     start_disabled = (
@@ -616,13 +615,13 @@ def main() -> None:
     )
 
     start_clicked = start_col.button(
-        "Start generation",
+        "开始排队/执行生成",
         type="primary",
         width="stretch",
         disabled=start_disabled,
     )
     stop_clicked = stop_col.button(
-        "Stop session",
+        "终止当前运行会话",
         width="stretch",
         disabled=running_metadata is None,
     )
@@ -632,19 +631,19 @@ def main() -> None:
     if running_metadata and cleanup_mode == EXEC_MODE_CLI:
         cleanup_cli_backend = str(running_metadata.get("cli_backend", DEFAULT_CLI_BACKEND))
 
-    cleanup_label = "Runner process" if cleanup_mode == EXEC_MODE_NATIVE else safe_cli_label(cleanup_cli_backend)
+    cleanup_label = "原生架构 Python 进程" if cleanup_mode == EXEC_MODE_NATIVE else safe_cli_label(cleanup_cli_backend)
 
     cleanup_clicked = cleanup_col.button(
-        f"Force cleanup {cleanup_label}",
+        f"强力终止 {cleanup_label}",
         width="stretch",
     )
-    refresh_clicked = refresh_col.button("Refresh", width="stretch")
+    refresh_clicked = refresh_col.button("手动刷新状态", width="stretch")
 
     if start_clicked:
         effective_input_path = input_path
 
         if input_mode == MODE_FAST:
-            with st.spinner("Fast mode: expanding invention idea into disclosure document..."):
+            with st.spinner("极速模式启动：正在将发明构思扩充为交底书文档..."):
                 fast_ok, fast_message, generated_path = prepare_fast_mode_input(
                     session_id=session_id,
                     execution_mode=selected_execution_mode,
@@ -658,7 +657,7 @@ def main() -> None:
                 return
 
             if generated_path is None:
-                st.error("Fast mode did not return a generated input file.")
+                st.error("极速模式执行后未能获得生成的输入文本。")
                 safe_rerun()
                 return
 
@@ -694,36 +693,36 @@ def main() -> None:
             killed, _ = cleanup_all_cli_processes(cleanup_cli_backend)
             if killed > 0:
                 st.success(
-                    f"Force cleanup completed, terminated {killed} {safe_cli_label(cleanup_cli_backend)} process(es)."
+                    f"清理完成，强行终止了 {killed} 个 {safe_cli_label(cleanup_cli_backend)} 进程。"
                 )
             else:
-                st.info(f"No running {safe_cli_label(cleanup_cli_backend)} process found to terminate.")
+                st.info(f"没有找到仍在运行中的 {safe_cli_label(cleanup_cli_backend)} 进程。")
         else:
             killed, _ = cleanup_all_runner_processes()
             if killed > 0:
-                st.success(f"Force cleanup completed, terminated {killed} runner process(es).")
+                st.success(f"清理完成，强行终止了 {killed} 个原生引擎流水机进程。")
             else:
-                st.info("No running pipeline runner process found to terminate.")
+                st.info("没有找到仍在运行中的流水线进程。")
         safe_rerun()
 
     if refresh_clicked:
         safe_rerun()
 
-    log_tab, output_tab, history_tab = st.tabs(["Log stream", "Generated files", "History"])
+    log_tab, output_tab, history_tab = st.tabs(["实时运行日志", "生成的文件结果", "运行历史记录"])
 
     with log_tab:
         if not is_valid_uuid(session_id):
-            st.info("Provide a valid session ID to inspect logs.")
+            st.info("请提供一个有效的会话 ID 来查看日志流水。")
         else:
             lines = tail_log_lines(get_log_path(session_id), st.session_state.max_log_lines)
             if not lines:
-                st.info("No log content available yet.")
+                st.info("暂无日志记录可以显示。")
             else:
                 if st.session_state.show_raw_json:
                     st.code("".join(lines), language="json")
                 else:
                     rendered = render_formatted_logs(lines)
-                    st.code(rendered or "No parseable messages in current log window.", language="text")
+                    st.code(rendered or "目前加载的日志窗口内没有解析出有效消息。", language="text")
 
             current_log_path = get_log_path(session_id)
             if current_log_path.exists():
@@ -737,7 +736,7 @@ def main() -> None:
 
     with output_tab:
         if not is_valid_uuid(session_id):
-            st.info("Provide a valid session ID to inspect generated files.")
+            st.info("请提供一个有效的会话 ID 来查看所生成的文件。")
         else:
             session_dir = get_session_dir(session_id)
             st.caption(to_display_path(session_dir))
@@ -746,14 +745,14 @@ def main() -> None:
                 archive_data = build_session_archive(session_id)
             if archive_data is not None:
                 st.download_button(
-                    label=f"Download session bundle ({session_id}.zip)",
+                    label=f"将此会话一键打包下载 ({session_id}.zip)",
                     data=archive_data,
                     file_name=f"patent_session_{session_id}.zip",
                     mime="application/zip",
                     width="stretch",
                 )
             else:
-                st.caption("Session bundle will be available after run completion.")
+                st.caption("当一次完整的生成任务结束后，您可以一键打包下载全部中间及最终文件。")
             render_file_preview(
                 "01_input/parsed_info.json",
                 session_dir / "01_input" / "parsed_info.json",
@@ -783,10 +782,10 @@ def main() -> None:
     with history_tab:
         session_rows = build_history_rows(sessions)
         if not session_rows:
-            st.info("No history sessions found.")
+            st.info("尚未发现历史会话记录。")
         else:
             st.dataframe(session_rows, width="stretch", hide_index=True)
-            st.caption("Load a session from the sidebar to inspect or continue it.")
+            st.caption("可从左侧配置栏下拉加载某个历史会话进程，以查看记录或尝试恢复生成操作。")
 
     if st.session_state.auto_refresh and running_metadata is not None:
         time.sleep(int(st.session_state.refresh_seconds))

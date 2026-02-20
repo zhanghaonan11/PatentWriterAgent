@@ -283,7 +283,7 @@ def run_cli_once(
         return (
             False,
             normalize_newlines(timeout_output),
-            f"{get_cli_label(cli_backend)} timed out after {timeout_seconds} seconds during fast-mode preprocessing.",
+            f"极速模式预处理期间 {get_cli_label(cli_backend)} 请求超时 ({timeout_seconds} 秒)。",
             command,
         )
 
@@ -292,7 +292,7 @@ def run_cli_once(
         return (
             False,
             output,
-            f"{get_cli_label(cli_backend)} exited with code {completed.returncode} during fast-mode preprocessing.",
+            f"极速模式预处理进程异常退出，状态码: {completed.returncode}",
             command,
         )
 
@@ -308,7 +308,7 @@ def prepare_fast_mode_input(
 ) -> Tuple[bool, str, Optional[Path]]:
     idea = invention_idea.strip()
     if not idea:
-        return False, "Fast mode requires a non-empty invention idea.", None
+        return False, "极速模式需要提供详细的发明构思。", None
 
     prompt = build_fast_mode_prompt(idea)
 
@@ -320,7 +320,7 @@ def prepare_fast_mode_input(
         )
         append_log_event(
             session_id,
-            "fast mode preprocessing started",
+            "极速模式预处理开始",
             f"Command: {' '.join(shlex.quote(item) for item in command)}",
         )
     else:
@@ -330,15 +330,15 @@ def prepare_fast_mode_input(
         )
         append_log_event(
             session_id,
-            "fast mode preprocessing started",
+            "极速模式预处理开始",
             f"Runtime backend: {safe_runtime_label(runtime_backend)}",
         )
 
     if raw_output.strip():
-        append_log_event(session_id, "fast mode preprocessing output", raw_output)
+        append_log_event(session_id, "预处理输出内容", raw_output)
 
     if not ok:
-        append_log_event(session_id, "fast mode preprocessing failed", error_message)
+        append_log_event(session_id, "预处理失败", error_message)
         return False, error_message, None
 
     expanded_text = extract_fast_disclosure_text(raw_output)
@@ -346,10 +346,10 @@ def prepare_fast_mode_input(
 
     if len(expanded_text.strip()) < 80:
         message = (
-            "Fast mode generated insufficient disclosure content. "
-            "Please provide a bit more detail and retry."
+            "极速模式生成的交底书内容过少。\n"
+            "请提供更多细节后重试。"
         )
-        append_log_event(session_id, "fast mode preprocessing failed", message)
+        append_log_event(session_id, "预处理失败", message)
         return False, message, None
 
     target_dir = DATA_DIR / "uploads" / session_id
@@ -363,8 +363,8 @@ def prepare_fast_mode_input(
 
     append_log_event(
         session_id,
-        "fast mode preprocessing completed",
-        f"Generated: {to_display_path(markdown_path)}\nGenerated: {to_display_path(docx_path)}",
+        "极速模式预处理完成",
+        f"生成文件：{to_display_path(markdown_path)}\n生成文件：{to_display_path(docx_path)}",
     )
 
-    return True, f"Fast mode generated disclosure file: {to_display_path(docx_path)}", docx_path
+    return True, f"极速模式成功生成技术交底书文件：{to_display_path(docx_path)}", docx_path

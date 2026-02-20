@@ -37,16 +37,16 @@ def normalize_execution_mode(execution_mode: str) -> str:
 def get_execution_mode_label(execution_mode: str) -> str:
     mode = normalize_execution_mode(execution_mode)
     if mode == EXEC_MODE_CLI:
-        return "CLI runtime"
-    return "Native runtime"
+        return "命令行后端 (CLI)"
+    return "代码原生引擎 (Native)"
 
 
 def get_mode_label(mode: str) -> str:
     from app.config import MODE_FAST
 
     if mode == MODE_FAST:
-        return "Fast mode (idea -> disclosure -> patent)"
-    return "Normal mode (.docx -> patent)"
+        return "极速模式 (一句话发明的构思 -> 交底书 -> 专利)"
+    return "标准模式 (上传交底书文件 -> 专利)"
 
 
 # --- CLI backend helpers ---
